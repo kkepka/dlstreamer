@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 # ==============================================================================
 """
-ONVIF camera profile data structures and configuration management.
+ONVIF camera profile data structure.
 """
 
 
