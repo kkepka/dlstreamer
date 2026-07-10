@@ -52,6 +52,7 @@ class ONVIFProfile:  # pylint: disable=too-many-instance-attributes, too-many-pu
         self._port = 0
         self._username = ""
         self._password = ""
+        self._mac_address = ""
 
         # ONVIF Profile details
         self._name = ""
@@ -139,6 +140,16 @@ class ONVIFProfile:  # pylint: disable=too-many-instance-attributes, too-many-pu
     def password(self, password: str):
         """Set the password for camera authentication."""
         self._password = password
+
+    @property
+    def mac_address(self) -> str:
+        """Get the MAC address of the camera."""
+        return self._mac_address
+
+    @mac_address.setter
+    def mac_address(self, mac_address: str):
+        """Set the MAC address of the camera."""
+        self._mac_address = mac_address
 
     @property
     def name(self) -> str:

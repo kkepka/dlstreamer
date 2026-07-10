@@ -40,6 +40,10 @@ _SUBSCRIPTION_MANAGER_BINDING = (
     "{http://www.onvif.org/ver10/events/wsdl}SubscriptionManagerBinding"
 )
 
+_PULLPOINT_BINDING = (
+    "{http://www.onvif.org/ver10/events/wsdl}PullPointSubscriptionBinding"
+)
+
 
 # ---------------------------------------------------------------------------
 # Zeep → dataclass parsing
@@ -64,6 +68,23 @@ def _extract_simple_items(container: Any) -> dict[str, str]:
     }
 
 
+def _is_lxml_element(obj: Any) -> bool:
+    """Return True when *obj* is an lxml ``Element``."""
+    return hasattr(obj, "tag") and hasattr(obj, "xpath")
+
+
+_TT_NS = {"tt": "http://www.onvif.org/ver10/schema"}
+
+
+def _extract_simple_items_xml(element: Any) -> dict[str, str]:
+    """Extract ``SimpleItem`` children from an lxml Element."""
+    items = element.xpath("tt:SimpleItem", namespaces=_TT_NS)
+    return {
+        (item.get("Name") or ""): (item.get("Value") or "")
+        for item in items
+    }
+
+
 def _parse_notification(msg: Any) -> EventNotification:
     """Convert a zeep ``NotificationMessage`` into :class:`EventNotification`."""
     # Topic can be nested under Topic._value_1 (mixed content)
@@ -81,6 +102,20 @@ def _parse_notification(msg: Any) -> EventNotification:
     if inner is None:
         return EventNotification(topic=topic, raw=msg)
 
+    # --- lxml Element path (vendor cameras that return raw XML) ---
+    if _is_lxml_element(inner):
+        src_el = inner.xpath("tt:Source", namespaces=_TT_NS)
+        dat_el = inner.xpath("tt:Data", namespaces=_TT_NS)
+        return EventNotification(
+            topic=topic,
+            utc_time=inner.get("UtcTime") or "",
+            property_operation=inner.get("PropertyOperation") or "",
+            source=_extract_simple_items_xml(src_el[0]) if src_el else {},
+            data=_extract_simple_items_xml(dat_el[0]) if dat_el else {},
+            raw=msg,
+        )
+
+    # --- zeep object path (standard ONVIF cameras) ---
     return EventNotification(
         topic=topic,
         utc_time=_text(getattr(inner, "UtcTime", "")),
@@ -173,7 +208,27 @@ class OnvifEventEngine:
                 raise RuntimeError(
                     "PullPoint subscription is not active; call subscribe() first."
                 )
-            self._pullpoint = self._get_client().create_pullpoint_service()
+            if not self._subscription_reference:
+                # Fallback for cameras that don't return a reference URL.
+                self._pullpoint = self._get_client().create_pullpoint_service()
+            else:
+                # Build the service manually, pointing at the subscription
+                # reference URL returned by CreatePullPointSubscription.
+                cam = self._get_client()
+                _, wsdl_file, _ = cam.get_definition("events")
+                self._pullpoint = ONVIFService(
+                    xaddr=self._subscription_reference,
+                    user=self.username,
+                    passwd=self.password,
+                    url=wsdl_file,
+                    encrypt=cam.encrypt,
+                    daemon=cam.daemon,
+                    no_cache=cam.no_cache,
+                    portType=None,
+                    dt_diff=cam.dt_diff,
+                    binding_name=_PULLPOINT_BINDING,
+                    transport=cam.transport,
+                )
         return self._pullpoint
 
     def _subscription_manager_service(self) -> ONVIFService:

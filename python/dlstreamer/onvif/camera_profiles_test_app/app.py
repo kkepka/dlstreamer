@@ -159,7 +159,8 @@ def _print_result(result: CameraProfilesResult) -> None:
     if not result.ok:
         print(f"  [FAIL] {camera_id}: {result.error}")
         return
-    print(f"  [ OK ] {camera_id}: {len(result.profiles)} profile(s)")
+    mac_info = f"  MAC={result.mac_address}" if result.mac_address else ""
+    print(f"  [ OK ] {camera_id}: {len(result.profiles)} profile(s){mac_info}")
     _print_profiles(result.profiles, camera_id)
 
 
@@ -624,13 +625,14 @@ def action_show_state(state: TestAppState) -> None:
             camera_id,
             "ok" if r.ok else "fail",
             str(len(r.profiles)),
+            r.mac_address or "-",
             (r.error or "-")[:60],
         ]
         for camera_id, r in state.results.items()
     ]
     _print_table(
         "Cached profile results",
-        ["camera", "status", "profiles", "error (trimmed)"],
+        ["camera", "status", "profiles", "MAC", "error (trimmed)"],
         rows,
     )
     for camera_id, r in state.results.items():

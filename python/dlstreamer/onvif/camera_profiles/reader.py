@@ -33,6 +33,29 @@ from .profile import ONVIFProfile
 from .media_profiles import _fetch_media_profiles
 
 
+def _fetch_mac_address(client, verbose: bool = False) -> str:
+    """Query the camera's Device Management service for its MAC address.
+
+    Uses ``GetNetworkInterfaces()`` and returns the ``HwAddress`` of the
+    first interface found.  Returns an empty string when the information
+    is unavailable.
+    """
+    try:
+        device_service = client.create_devicemgmt_service()
+        interfaces = device_service.GetNetworkInterfaces()
+        for iface in interfaces:
+            if hasattr(iface, "Info") and iface.Info:
+                hw = getattr(iface.Info, "HwAddress", None)
+                if hw:
+                    if verbose:
+                        print(f"  MAC address: {hw}")
+                    return str(hw)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        if verbose:
+            print(f"[WARN] Could not retrieve MAC address: {exc}")
+    return ""
+
+
 CameraSource = Union[Iterable[dict], AsyncIterable[dict]]
 
 
@@ -44,12 +67,14 @@ class CameraProfilesResult:
         hostname: Camera hostname/IP as reported by discovery.
         port: ONVIF service port as reported by discovery.
         profiles: Media profiles returned by the camera (empty on error).
+        mac_address: MAC address of the camera (empty string if unavailable).
         error: ``None`` on success, otherwise a ``"ExcType: message"`` string.
     """
 
     hostname: str
     port: int
     profiles: List[ONVIFProfile] = field(default_factory=list)
+    mac_address: str = ""
     error: Optional[str] = None
 
     @property
@@ -87,12 +112,14 @@ class CameraProfileReader:
         result = CameraProfilesResult(hostname=hostname, port=int(port))
         try:
             client = ONVIFCamera(hostname, port, self.username, self.password)
+            result.mac_address = _fetch_mac_address(client, verbose=self.verbose)
             profiles = _fetch_media_profiles(client, verbose=self.verbose)
             for profile in profiles:
                 profile.ip = hostname
                 profile.port = int(port)
                 profile.username = self.username
                 profile.password = self.password
+                profile.mac_address = result.mac_address
             result.profiles = profiles
         except Exception as exc:  # pylint: disable=broad-exception-caught
             result.error = f"{type(exc).__name__}: {exc}"
