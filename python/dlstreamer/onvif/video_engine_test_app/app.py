@@ -17,13 +17,16 @@ from typing import Any, Iterable, Optional
 
 from dlstreamer.onvif.camera_profiles import read_camera_profiles
 from dlstreamer.onvif.video_engine import (
+    DynamicPipelineController,
     VideoEngine,
     VideoEngineEvent,
+    create_dynamic_controller,
     create_video_engine,
 )
 
 
 DEFAULT_CONFIG_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_pipelines.json")
+DEFAULT_RULES_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_rules.json")
 REQUIRED_ENV_VARS = [
     ("ONVIF_USER", "required", "ONVIF authentication username"),
     ("ONVIF_PASSWORD", "required", "ONVIF authentication password"),
@@ -47,11 +50,17 @@ class TestAppState:
             if cwd_config.exists():
                 self.config_path = cwd_config
         self.engine: VideoEngine = create_video_engine(self.config_path, verbose=True)
+        self.controller: DynamicPipelineController = create_dynamic_controller(self.engine, verbose=True)
+        self.rules_path = DEFAULT_RULES_PATH
+        self.dynamic_active = False
         self.logs: list[dict[str, Any]] = []
         self.discovery_active = False
         self.engine.register_callback(self._on_engine_event)
 
     def close(self) -> None:
+        if self.dynamic_active:
+            self.controller.stop()
+            self.dynamic_active = False
         self.engine.destroy()
         self.discovery_active = False
 
@@ -151,6 +160,30 @@ def _rows_for_events(events: list[dict[str, Any]]) -> list[list[str]]:
                 + (f" ({camera.get('mac')})" if camera.get("mac") else ""),
                 str(item.get("topic_filter", "-") or "-"),
                 str(item.get("renew_every", "-") or "-"),
+            ]
+        )
+    return rows
+
+
+def _rows_for_rules(rules: list[Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, rule in enumerate(rules, 1):
+        trigger = rule.trigger
+        parts: list[str] = []
+        if trigger.topic_contains:
+            parts.append(f"topic~{trigger.topic_contains}")
+        if trigger.property_operation:
+            parts.append(f"op={trigger.property_operation}")
+        if trigger.data_equals:
+            parts.append(",".join(f"{key}={value}" for key, value in trigger.data_equals.items()))
+        rows.append(
+            [
+                str(index),
+                str(rule.name),
+                rule.camera.key(),
+                rule.action.value,
+                str(rule.target_binding_id),
+                "; ".join(parts) or "-",
             ]
         )
     return rows
@@ -310,6 +343,10 @@ def build_dump_report(state: TestAppState) -> str:
     lines.append(_render_table("Configured ONVIF events", ["#", "name", "camera", "topic_filter", "renew_every"], _rows_for_events(all_events)))
 
     lines.append("")
+    lines.append(f"dynamic_control_running: {state.dynamic_active}")
+    lines.append(_render_table("Dynamic event->action rules", ["#", "name", "camera", "action", "target_binding_id", "trigger"], _rows_for_rules(state.controller.list_rules())))
+
+    lines.append("")
     lines.append(_render_table("Logs", ["#", "time", "level", "kind", "camera", "message"], _rows_for_logs(state.logs)))
 
     lines.append("")
@@ -452,6 +489,46 @@ def _action_check_environment(state: TestAppState) -> None:
 def _action_show_json(state: TestAppState) -> None:
     state.log_event("INFO", "show_json", "local", {"config_path": str(state.config_path)}, message="json configuration inspected")
     print(build_json_report(state.config_path))
+
+
+def _action_load_rules(state: TestAppState) -> None:
+    path = _prompt("Dynamic rules file", str(state.rules_path))
+    state.rules_path = Path(path)
+    try:
+        rules = state.controller.load_rules(state.rules_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        state.log_event("ERROR", "load_rules", "local", {"error": str(exc)}, message="failed to load rules")
+        print(f"Failed to load rules: {exc}")
+        return
+    state.log_event("INFO", "load_rules", "local", {"rules_path": str(state.rules_path), "count": len(rules)}, message="dynamic rules loaded")
+    print(f"Loaded {len(rules)} dynamic rule(s).")
+
+
+def _action_start_dynamic(state: TestAppState) -> None:
+    if not state.controller.list_rules():
+        print("No rules loaded. Load dynamic rules first.")
+        return
+    state.controller.start()
+    state.dynamic_active = True
+    state.log_event("INFO", "start_dynamic", "local", {"rules": len(state.controller.list_rules())}, message="dynamic pipeline control started")
+    print("Dynamic pipeline control started.")
+
+
+def _action_stop_dynamic(state: TestAppState) -> None:
+    state.controller.stop()
+    state.dynamic_active = False
+    state.log_event("INFO", "stop_dynamic", "local", {}, message="dynamic pipeline control stopped")
+    print("Dynamic pipeline control stopped.")
+
+
+def _action_show_rules(state: TestAppState) -> None:
+    state.log_event("INFO", "show_rules", "local", {"rules_path": str(state.rules_path)}, message="dynamic rules inspected")
+    print(f"dynamic_control_running: {state.dynamic_active}")
+    print(_render_table(
+        "Dynamic event->action rules",
+        ["#", "name", "camera", "action", "target_binding_id", "trigger"],
+        _rows_for_rules(state.controller.list_rules()),
+    ))
 
 
 def _collect_all_profiles(
@@ -598,7 +675,11 @@ def run(argv: Optional[list[str]] = None) -> None:
             print("10) Clear logs")
             print("11) List camera profiles")
             print("12) Preview stream")
-            print("13) Quit")
+            print("13) Load dynamic event->action rules")
+            print("14) Start dynamic pipeline control (event-driven)")
+            print("15) Stop dynamic pipeline control")
+            print("16) Show dynamic rules")
+            print("17) Quit")
 
             choice = _prompt("Select option")
             if choice == "__cancel__":
@@ -629,6 +710,14 @@ def run(argv: Optional[list[str]] = None) -> None:
             elif choice == "12":
                 _action_preview_stream(state)
             elif choice == "13":
+                _action_load_rules(state)
+            elif choice == "14":
+                _action_start_dynamic(state)
+            elif choice == "15":
+                _action_stop_dynamic(state)
+            elif choice == "16":
+                _action_show_rules(state)
+            elif choice == "17":
                 break
             else:
                 print("Unknown option.")

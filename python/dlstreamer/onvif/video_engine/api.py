@@ -15,8 +15,18 @@ from .model import (
     CameraEventDefinition,
     CameraIdentity,
     CameraRuntimeState,
+    EventRule,
+    EventTrigger,
+    PipelineAction,
     PipelineBinding,
     VideoEngineEvent,
+)
+from .dynamic import (
+    CameraEventWorker,
+    DynamicPipelineController,
+    EventRuleMatcher,
+    EventRuleParser,
+    PipelineActionExecutor,
 )
 from ..camera_profiles import (
     ONVIFProfile,
@@ -181,11 +191,26 @@ def get_active_pipelines() -> list[dict[str, Any]]:
     return _DEFAULT_ENGINE.get_active_pipelines()
 
 
+def create_dynamic_controller(
+    engine: VideoEngine | None = None,
+    *,
+    verbose: bool = False,
+) -> DynamicPipelineController:
+    """Create a controller wiring ONVIF events to pipeline changes.
+
+    Defaults to the shared engine instance when ``engine`` is omitted.
+    """
+    return DynamicPipelineController(engine or _DEFAULT_ENGINE, verbose=verbose)
+
+
 __all__ = [
     # ===== Model classes =====
     "CameraEventDefinition",
     "CameraIdentity",
     "CameraRuntimeState",
+    "EventRule",
+    "EventTrigger",
+    "PipelineAction",
     "PipelineBinding",
     "VideoEngine",
     "VideoEngineEvent",
@@ -225,6 +250,14 @@ __all__ = [
     # ===== State query =====
     "get_active_cameras",
     "get_active_pipelines",
+
+    # ===== Dynamic (event-driven) pipeline control =====
+    "DynamicPipelineController",
+    "EventRuleMatcher",
+    "EventRuleParser",
+    "PipelineActionExecutor",
+    "CameraEventWorker",
+    "create_dynamic_controller",
     
     # ===== Camera profiles library =====
     "ONVIFProfile",

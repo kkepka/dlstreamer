@@ -24,12 +24,30 @@ against the same instance.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, List, Optional
+import inspect
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    List,
+    Optional,
+    Union,
+)
 
 from onvif import ONVIFCamera  # pylint: disable=import-error
 from onvif.client import ONVIFService  # pylint: disable=import-error
 
 from .model import EventCapableCamera, EventFilter, EventNotification
+
+
+# ---------------------------------------------------------------------------
+# Public callback type
+# ---------------------------------------------------------------------------
+
+# A per-event callback. May be a plain function or an ``async def`` coroutine
+# function; both are supported by :meth:`OnvifEventEngine.stream_to_callback`.
+EventCallback = Callable[[EventNotification], Union[None, Awaitable[None]]]
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +515,34 @@ class OnvifEventEngine:
                     pass
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
+
+    async def stream_to_callback(
+        self,
+        callback: EventCallback,
+        timeout: str = "PT30S",
+        limit: int = 100,
+        renew_every: Optional[float] = 300.0,
+    ) -> None:
+        """Invoke ``callback`` for every notification as it arrives.
+
+        Thin wrapper around :meth:`stream`: keeps pulling notifications
+        (auto-renewing the subscription per ``renew_every``) and calls
+        ``callback`` once per :class:`EventNotification`.
+
+        The callback may be a plain function or an ``async def`` coroutine
+        function; coroutine results are awaited. Runs until the caller
+        cancels the surrounding task or an underlying SOAP call raises.
+
+        Requires an active subscription (:meth:`subscribe`).
+        """
+        async for note in self.stream(
+            timeout=timeout,
+            limit=limit,
+            renew_every=renew_every,
+        ):
+            result = callback(note)
+            if inspect.isawaitable(result):
+                await result
 
     # ---- async wrappers ----
 

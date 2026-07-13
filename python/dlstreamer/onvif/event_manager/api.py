@@ -51,7 +51,7 @@ from .capabilities import (
     find_event_capable_cameras_async,
     is_event_capable,
 )
-from .engine import OnvifEventEngine
+from .engine import EventCallback, OnvifEventEngine
 
 
 def pull_events_once(
@@ -111,6 +111,59 @@ async def stream_events(
     finally:
         await asyncio.to_thread(engine.close)
 
+
+def print_event_type(note: EventNotification) -> None:
+    """Default event callback: print the event *type* (its ONVIF topic).
+
+    The ONVIF ``topic`` fully identifies the event type, e.g.
+    ``tns1:RuleEngine/CellMotionDetector/Motion`` or
+    ``tns1:VideoSource/MotionAlarm``. Falls back to ``"<unknown>"`` when a
+    camera omits the topic.
+    """
+    print(f"{{EVENT}} [event] type: {note.topic or '<unknown>'}")
+
+
+async def watch_events(
+    hostname: str,
+    port: int,
+    username: str = "",
+    password: str = "",
+    callback: EventCallback = print_event_type,
+    verbose: bool = False,
+    timeout: str = "PT30S",
+    limit: int = 100,
+    termination_time: str = "PT1H",
+    topic_filter: Optional[EventFilter] = None,
+    renew_every: Optional[float] = 300.0,
+) -> None:
+    """Subscribe and invoke ``callback`` for every new camera event.
+
+    Handles the full subscription lifecycle (subscribe -> stream ->
+    close) and calls ``callback`` once per :class:`EventNotification` as
+    events arrive. Defaults to :func:`print_event_type`, which prints the
+    event type (ONVIF topic) to stdout.
+
+    ``callback`` may be a plain function or an ``async def`` coroutine
+    function. Runs until the caller cancels the surrounding task (e.g.
+    Ctrl+C / task cancellation) or an underlying SOAP call raises.
+    """
+    engine = OnvifEventEngine(hostname, port, username, password, verbose)
+    try:
+        await asyncio.to_thread(
+            engine.subscribe,
+            termination_time,
+            topic_filter,
+        )
+        await engine.stream_to_callback(
+            callback,
+            timeout=timeout,
+            limit=limit,
+            renew_every=renew_every,
+        )
+    finally:
+        await asyncio.to_thread(engine.close)
+
+
 __all__ = [
     # data model
     "EventCapableCamera",
@@ -123,4 +176,7 @@ __all__ = [
     # simple event reading
     "pull_events_once",
     "stream_events",
+    # callback-based event watching
+    "print_event_type",
+    "watch_events",
 ]

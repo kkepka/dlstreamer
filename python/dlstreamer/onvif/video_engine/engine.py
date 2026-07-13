@@ -207,6 +207,75 @@ class VideoEngine:
             definitions = self._event_definitions.get(identity.key(), [])
             return [asdict(item) for item in definitions]
 
+    def add_pipeline(self, binding: PipelineBinding, *, start: bool = True) -> PipelineBinding:
+        """Register a pipeline binding and optionally start it immediately.
+
+        Replaces any existing binding sharing the same ``binding_id`` so the
+        operation is idempotent for event-driven callers.
+        """
+        with self._lock:
+            self._bindings = [b for b in self._bindings if b.binding_id != binding.binding_id]
+            self._bindings.append(binding)
+            self._binding_lookup[binding.binding_id] = binding
+        if start:
+            self._start_pipeline_if_needed(binding)
+        return binding
+
+    def remove_pipeline(self, binding_id: str) -> None:
+        """Stop a running pipeline (if any) and forget its binding."""
+        self._stop_pipeline(binding_id)
+        with self._lock:
+            self._bindings = [b for b in self._bindings if b.binding_id != binding_id]
+            self._binding_lookup.pop(binding_id, None)
+
+    def replace_pipeline(
+        self,
+        binding_id: str,
+        pipeline: Sequence[str] | str,
+        *,
+        camera: CameraIdentity | None = None,
+        profile_name: str | None = None,
+        events: Iterable[str] | None = None,
+        start: bool = True,
+    ) -> PipelineBinding:
+        """Restart-based modification: stop, swap the command, start again.
+
+        Preserves the existing binding's camera/profile/events when they are
+        not overridden. Falls back to ``camera`` when the binding is new.
+        """
+        with self._lock:
+            current = self._binding_lookup.get(binding_id)
+        target_camera = camera or (current.camera if current is not None else None)
+        if target_camera is None:
+            raise ValueError("replace_pipeline requires a known binding or an explicit camera")
+
+        self._stop_pipeline(binding_id)
+
+        event_tuple = (
+            tuple(str(item) for item in events)
+            if events is not None
+            else (current.events if current is not None else ())
+        )
+        resolved_profile = profile_name if profile_name is not None else (current.profile_name if current else None)
+        new_binding = PipelineBinding(target_camera, pipeline_list(pipeline), binding_id, event_tuple, resolved_profile)
+
+        with self._lock:
+            self._bindings = [b for b in self._bindings if b.binding_id != binding_id]
+            self._bindings.append(new_binding)
+            self._binding_lookup[binding_id] = new_binding
+        if start:
+            self._start_pipeline_if_needed(new_binding)
+        return new_binding
+
+    def restart_pipeline(self, binding_id: str) -> None:
+        """Stop and start the pipeline for an existing binding unchanged."""
+        with self._lock:
+            binding = self._binding_lookup.get(binding_id)
+        if binding is None:
+            return
+        self._stop_pipeline(binding_id)
+        self._start_pipeline_if_needed(binding)
+
     def get_active_cameras(self) -> list[dict[str, Any]]:
         with self._lock:
             return [self._runtime_state_to_dict(state) for state in self._camera_states.values()]

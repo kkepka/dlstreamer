@@ -1,12 +1,162 @@
-# dlstreamer.onvif.ptz
+# `ptz` library — overview
 
-Library for discovering PTZ-capable ONVIF profiles and controlling PTZ cameras.
+The `ptz` library implements **PTZ (Pan-Tilt-Zoom) control** for ONVIF cameras
+that expose profiles conforming to the ONVIF PTZ Service ver 2.0 WSDL. It does
+two things: discovers which profiles are PTZ-capable, and drives the camera
+through a controller.
 
-This module filters media profiles and provides controller methods to move the camera.
+It builds on two companion libraries:
 
-## Public API
+- [`discovery`](../discovery/README.md) — locates ONVIF cameras on the network.
+- [`camera_profiles`](../camera_profiles/README.md) — reads media profiles; PTZ
+  uses the profile's `ptz_token` to filter out non-PTZ profiles.
 
-The public API is defined in api.py and re-exported by __init__.py.
+## Layered architecture
+
+```mermaid
+flowchart TD
+    subgraph Internal["<b><big>PTZ</big></b>"]
+        direction TB
+        API["Public API<br/><b>__init__.py + api.py</b><br/>(re-export surface)"]
+        subgraph Core["Core layer"]
+            CAP["<b>capabilities.py</b><br/>PTZ-capable profile discovery"]
+            CTRL["<b>controller.py</b><br/>PTZController"]
+        end
+        subgraph Data["Data layer"]
+            MODEL["<b>model.py</b><br/>PTZVector / PTZStatus / PTZPreset / PTZCapableProfile"]
+        end
+    end
+    subgraph External["External"]
+        direction TB
+        DISC["discovery"]
+        PROF["camera_profiles"]
+        ONVIF["onvif.ONVIFCamera<br/>(PTZ service)"]
+    end
+
+    API --> CAP
+    API --> CTRL
+    API --> MODEL
+    CAP --> MODEL
+    CAP --> PROF
+    PROF --> DISC
+    CTRL --> MODEL
+    CTRL --> ONVIF
+    MODEL ~~~ External
+    style Internal fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+    style External fill:#f1f3f4,stroke:#9aa0a6,stroke-width:2px
+    style ONVIF fill:#ceead6,stroke:#34a853,stroke-width:1px
+```
+
+### Diagram legend
+
+```mermaid
+flowchart LR
+    u1((" ")) -->|"solid: uses / calls (internal dependency)"| u2((" "))
+    d1((" ")) -.->|"dashed: data flow / re-export (across libraries)"| d2((" "))
+```
+
+- **Solid arrow** `-->`: an internal dependency — one module uses, calls or contains another.
+- **Dashed arrow** `-.->`: a looser data flow between libraries (e.g. camera descriptors) or a re-export of another library's public API.
+- Edge labels (e.g. `re-export`, `Probe / ProbeMatch`, `{hostname, port}`) name the concrete payload or operation.
+- A **green** node marks a third-party library that is **not** part of the ONVIF suite (outside the `onvif` folder).
+
+---
+
+## 1. `__init__.py` — package shim
+
+Re-exports the public symbols from `api.py`.
+
+## 2. `api.py` — public surface
+
+Declares the module docstring and re-exports the data model, capability helpers
+(`is_ptz_profile`, `find_ptz_capable_profiles[_async]`) and the `PTZController`.
+
+## 3. `model.py` — data model (dataclasses)
+
+| Class | Role |
+|-------|------|
+| `PTZVector` | Pan/tilt/zoom vector; serializes to ONVIF Position (`as_position_dict`) or Velocity (`as_velocity_dict`). Meaning depends on move type (velocity vs coordinate). |
+| `PTZStatus` | Snapshot from `GetStatus`: `position`, `pan_tilt_move_status`, `zoom_move_status`, `error`, `utc_time`. |
+| `PTZPreset` | A saved preset: `token`, `name`, optional `position`. |
+| `PTZCapableProfile` | A discovered profile confirmed to support PTZ; exposes `camera_id` = `"hostname:port"`. |
+
+## 4. `capabilities.py` — PTZ-capable profile discovery
+
+Consumes camera descriptors, reads their profiles through `camera_profiles`, and
+keeps only PTZ-capable ones:
+
+- `is_ptz_profile(profile)` — True when the profile carries a non-empty
+  `ptz_token`.
+- `_to_capable(result)` — extracts every PTZ profile from a
+  `CameraProfilesResult` into `PTZCapableProfile` objects.
+- `find_ptz_capable_profiles()` — sync generator.
+- `find_ptz_capable_profiles_async()` — async generator (accepts sync **or**
+  async camera sources, so it can pipe from `discover_onvif_cameras_async`).
+
+## 5. `controller.py` — `PTZController`
+
+One instance per `(camera, profile_token)` pair. Wraps an
+`onvif.ONVIFCamera` client plus its PTZ service (created **lazily** and reused).
+Every synchronous method has an `*_async` variant that offloads the blocking
+SOAP call via `asyncio.to_thread`.
+
+- **Construction**: direct, or `from_capable_profile(PTZCapableProfile)`.
+- **Read**: `get_status`, `get_presets`, `get_configurations`, `get_nodes`.
+- **Movement**: `continuous_move`, `relative_move`, `absolute_move`, `stop`.
+- **Presets**: `set_preset`, `goto_preset`, `remove_preset`.
+- **Home**: `goto_home`, `set_home`.
+- **Lifecycle**: `close()` / context manager (`with PTZController(...)`).
+
+**Client-side auto-stop**: `continuous_move(timeout=...)` does *not* send the
+SOAP `Timeout` field (several cameras reject fractional `xs:duration`). Instead
+it schedules a background `threading.Timer` that issues `Stop` after the delay.
+A monotonically increasing sequence number invalidates stale timers so
+back-to-back moves behave correctly.
+
+### Flow chart — continuous_move with client-side auto-stop
+
+```mermaid
+flowchart TD
+    START([continuous_move velocity, timeout]) --> CANCEL["_cancel_auto_stop_timer()<br/>bump seq, cancel pending timer"]
+    CANCEL --> SEND["PTZ.ContinuousMove(Velocity)"]
+    SEND --> HAS{"timeout > 0?"}
+    HAS -- no --> ENDN([return — moves until stop])
+    HAS -- yes --> TIMER["_start_auto_stop_timer(delay)<br/>threading.Timer(seq)"]
+    TIMER --> WAIT["timer fires after delay"]
+    WAIT --> CHK{"seq still current?"}
+    CHK -- no --> NOOP([no-op — superseded])
+    CHK -- yes --> STOP["PTZ.Stop()"]
+```
+
+### Sequence chart — discover PTZ profile → move → stop
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Cap as find_ptz_capable_profiles
+    participant Prof as camera_profiles
+    participant Ctrl as PTZController
+    participant Timer as threading.Timer
+    participant PTZ as ONVIF PTZ service
+
+    App->>Cap: find_ptz_capable_profiles(cameras, user, pass)
+    Cap->>Prof: read_camera_profiles()
+    Prof-->>Cap: CameraProfilesResult(profiles)
+    Cap-->>App: PTZCapableProfile (ptz_token set)
+
+    App->>Ctrl: from_capable_profile(cap, user, pass)
+    App->>Ctrl: continuous_move(PTZVector(pan=0.3), timeout=0.5)
+    Ctrl->>PTZ: ContinuousMove(Velocity)
+    Ctrl->>Timer: schedule Stop after 0.5s
+    Timer-->>PTZ: Stop()  %% client-side auto-stop
+    App->>Ctrl: close()
+```
+
+---
+
+## Public API reference
+
+The public API is defined in `api.py` and re-exported by `__init__.py`.
 
 ### Data model
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 
@@ -90,6 +91,50 @@ class CameraEventDefinition:
     topic_filter: Optional[str] = None
     renew_every: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class PipelineAction(str, Enum):
+    """Action applied to an analytics pipeline when an event rule matches."""
+
+    ADD = "add"
+    MODIFY = "modify"
+    REMOVE = "remove"
+    RESTART = "restart"
+
+
+@dataclass(frozen=True)
+class EventTrigger:
+    """Condition matched against an incoming ONVIF notification.
+
+    All populated fields must hold for the trigger to fire (logical AND).
+    Unset fields (``None`` / empty) are ignored. Matching itself is the
+    responsibility of the matcher, not of this pure data object.
+    """
+
+    topic_contains: Optional[str] = None
+    property_operation: Optional[str] = None
+    data_equals: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EventRule:
+    """Bind an ONVIF event condition to a pipeline action.
+
+    A rule ties a :class:`EventTrigger` on a given camera to a
+    :class:`PipelineAction` targeting a specific pipeline binding.
+    ``pipeline`` is required for :attr:`PipelineAction.ADD` and
+    :attr:`PipelineAction.MODIFY`, and ignored otherwise.
+    """
+
+    name: str
+    camera: CameraIdentity
+    trigger: EventTrigger
+    action: PipelineAction
+    target_binding_id: str
+    pipeline: Optional[Sequence[str] | str] = None
+    profile_name: Optional[str] = None
+    username: str = ""
+    password: str = ""
 
 
 def as_camera_identity(camera: Any) -> CameraIdentity:

@@ -1,12 +1,179 @@
-# dlstreamer.onvif.event_manager
+# `event_manager` library — overview
 
-Library for discovering ONVIF cameras that expose the Events service.
+The `event_manager` library implements an **ONVIF Events (PullPoint) engine**.
+It is a Python client for the ONVIF Events Service using the **PullPoint**
+subscription pattern: instead of opening an inbound HTTP port, notifications are
+fetched with long-polling `PullMessages` calls, so the engine works behind NAT
+and firewalls.
 
-This module focuses on event capability detection and event data models.
+It builds on two companion libraries:
 
-## Public API
+- [`discovery`](../discovery/README.md) — locates ONVIF cameras on the network.
+- [`camera_profiles`](../camera_profiles/README.md) — shares the sync/async
+  discovery style used by the capability helpers.
 
-The public API is defined in api.py and re-exported by __init__.py.
+## Layered architecture
+
+```mermaid
+flowchart TD
+    subgraph Internal["<b><big>Event Manager</big></b>"]
+        direction TB
+        API["Public API<br/><b>__init__.py + api.py</b><br/>(pull / stream / watch)"]
+        subgraph Core["Core layer"]
+            CAP["<b>capabilities.py</b><br/>event-capable camera discovery"]
+            ENGINE["<b>engine.py</b><br/>OnvifEventEngine (PullPoint lifecycle)"]
+        end
+        subgraph Data["Data layer"]
+            MODEL["<b>model.py</b><br/>EventNotification / EventFilter / EventCapableCamera"]
+        end
+    end
+    subgraph External["External"]
+        direction TB
+        DISC["discovery"]
+        ONVIF["onvif.ONVIFCamera<br/>(events + subscription mgr)"]
+    end
+
+    API --> CAP
+    API --> ENGINE
+    API --> MODEL
+    CAP --> MODEL
+    CAP --> ONVIF
+    CAP --> DISC
+    ENGINE --> MODEL
+    ENGINE --> ONVIF
+    MODEL ~~~ External
+    style Internal fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+    style External fill:#f1f3f4,stroke:#9aa0a6,stroke-width:2px
+    style ONVIF fill:#ceead6,stroke:#34a853,stroke-width:1px
+```
+
+### Diagram legend
+
+```mermaid
+flowchart LR
+    u1((" ")) -->|"solid: uses / calls (internal dependency)"| u2((" "))
+    d1((" ")) -.->|"dashed: data flow / re-export (across libraries)"| d2((" "))
+```
+
+- **Solid arrow** `-->`: an internal dependency — one module uses, calls or contains another.
+- **Dashed arrow** `-.->`: a looser data flow between libraries (e.g. camera descriptors) or a re-export of another library's public API.
+- Edge labels (e.g. `re-export`, `Probe / ProbeMatch`, `{hostname, port}`) name the concrete payload or operation.
+- A **green** node marks a third-party library that is **not** part of the ONVIF suite (outside the `onvif` folder).
+
+---
+
+## 1. `__init__.py` — package shim
+
+Re-exports the public symbols from `api.py`.
+
+## 2. `api.py` — public surface (simple functions)
+
+Wraps the engine lifecycle in one-line helpers so callers rarely touch the
+engine directly:
+
+- `pull_events_once()` — subscribe → pull one batch → close (blocking).
+- `stream_events()` — async generator with automatic subscribe / renew / close.
+- `watch_events()` — subscribe and invoke a callback per event (sync or async
+  callback); defaults to `print_event_type()`.
+- Re-exports the data model and capability helpers.
+
+## 3. `model.py` — data model (dataclasses)
+
+| Class | Role |
+|-------|------|
+| `EventFilter` | Topic-expression filter for `CreatePullPointSubscription` (`expression` + `dialect`, default `ConcreteSet`). |
+| `EventNotification` | A parsed `NotificationMessage`: `topic`, `utc_time`, `property_operation` (`Initialized`/`Changed`/`Deleted`), flattened `source`/`data` dicts, plus `raw`. `short()` renders a one-line log form. |
+| `EventCapableCamera` | Camera confirmed to expose an Events service; `camera_id` = `"hostname:port"`, `ok` reflects the probe. |
+
+## 4. `capabilities.py` — event-capable camera discovery
+
+Filters a discovery sweep down to cameras that answer
+`GetServiceCapabilities()` on their Events endpoint:
+
+- `is_event_capable()` — boolean probe (any error → `False`).
+- `_probe()` — same check but returns an `EventCapableCamera` carrying the error.
+- `find_event_capable_cameras()` — sync generator.
+- `find_event_capable_cameras_async()` — async generator (accepts sync **or**
+  async camera sources).
+
+## 5. `engine.py` — `OnvifEventEngine` (PullPoint lifecycle)
+
+One engine per camera, managing the full subscription lifecycle. Blocking
+methods each have an `*_async` variant offloading to a worker thread; the engine
+is safe for use from a single asyncio loop (not for parallel multi-thread calls).
+
+- **Construction**: direct, or `from_capable_camera()`; context-manager support.
+- **Lifecycle**: `subscribe` (`CreatePullPointSubscription`), `pull`
+  (`PullMessages` long-poll), `renew` (extend `TerminationTime`), `unsubscribe`,
+  `close`.
+- **Streaming**: `stream()` async generator that keeps pulling and
+  auto-renews in the background (`renew_every`); `stream_to_callback()`.
+- **Introspection**: `get_service_capabilities`, `get_event_properties`.
+- **Parsing**: `_parse_notification()` handles both the zeep-object path
+  (standard cameras) and the lxml-Element path (vendor cameras returning raw
+  XML), flattening `Source`/`Data` `SimpleItem` lists into dicts.
+
+A subtle detail: the PullPoint binding only exposes `PullMessages`; `Renew` and
+`Unsubscribe` live on the `SubscriptionManagerBinding` at the per-subscription
+reference URL. onvif-zeep has no factory for it, so the engine builds that
+`ONVIFService` manually (`_subscription_manager_service`).
+
+### Flow chart — PullPoint subscription lifecycle
+
+```mermaid
+flowchart TD
+    START([subscribe]) --> CREATE["events.CreatePullPointSubscription<br/>(InitialTerminationTime, optional Filter)"]
+    CREATE --> REF["store subscription_reference<br/>+ termination_time"]
+    REF --> LOOP{active?}
+    LOOP -- yes --> PULL["pullpoint.PullMessages<br/>(Timeout, MessageLimit)"]
+    PULL --> PARSE["_parse_notification()<br/>zeep OR lxml path"]
+    PARSE --> EMIT["return [EventNotification]"]
+    EMIT --> RENEWQ{"near termination?"}
+    RENEWQ -- yes --> RENEW["subscriptionMgr.Renew(PT1H)"]
+    RENEW --> LOOP
+    RENEWQ -- no --> LOOP
+    LOOP -- no --> UNSUB["subscriptionMgr.Unsubscribe()"]
+    UNSUB --> DONE([close: drop clients])
+```
+
+### Sequence chart — discover → subscribe → stream with auto-renew
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Cap as find_event_capable_cameras
+    participant Eng as OnvifEventEngine
+    participant Ev as Events service
+    participant PP as PullPoint
+    participant SM as SubscriptionManager
+    participant Renew as Renewer task
+
+    App->>Cap: find_event_capable_cameras(cameras)
+    Cap->>Ev: GetServiceCapabilities()
+    Ev-->>Cap: ok
+    Cap-->>App: EventCapableCamera
+
+    App->>Eng: from_capable_camera(cap) + subscribe()
+    Eng->>Ev: CreatePullPointSubscription
+    Ev-->>Eng: SubscriptionReference + TerminationTime
+
+    App->>Eng: async for note in stream()
+    Eng->>Renew: start background renewer (renew_every)
+    loop pull loop
+        Eng->>PP: PullMessages(Timeout, limit)
+        PP-->>Eng: [NotificationMessage]
+        Eng-->>App: yield EventNotification
+        Renew->>SM: Renew(PT1H) every renew_every
+    end
+    App->>Eng: close()
+    Eng->>SM: Unsubscribe()
+```
+
+---
+
+## Public API reference
+
+The public API is defined in `api.py` and re-exported by `__init__.py`.
 
 ### Data model
 

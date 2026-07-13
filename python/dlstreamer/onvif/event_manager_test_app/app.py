@@ -38,6 +38,7 @@ from dlstreamer.onvif.event_manager import (
     EventFilter,
     EventNotification,
     find_event_capable_cameras,
+    print_event_type,
 )
 from dlstreamer.onvif.event_manager.engine import OnvifEventEngine
 
@@ -431,6 +432,59 @@ def action_stream(state: TestAppState) -> None:
           f"(total cached: {len(state.notifications)})")
 
 
+def action_watch_event_types(state: TestAppState) -> None:
+    """Stream events through a callback that prints each event's type.
+
+    Demonstrates :meth:`OnvifEventEngine.stream_to_callback`: every new
+    notification triggers ``print_event_type``, which prints the ONVIF
+    topic (the event type). Runs until Ctrl+C or the time limit.
+    """
+    print("\n-- Watch event types (callback, Ctrl+C to stop) --")
+    if not _ensure_subscribed(state):
+        return
+
+    poll_timeout = _prompt("Per-pull timeout (ISO 8601)", "PT30S")
+    limit = _prompt_int("Per-pull message limit", 100)
+    max_seconds = _prompt_int("Stop after N seconds (0 = no limit)", 0)
+
+    engine = state.engine
+    count = 0
+    start = time.monotonic()
+
+    def _on_event(note: EventNotification) -> None:
+        nonlocal count
+        count += 1
+        state.notifications.append(note)
+        print_event_type(note)
+        if max_seconds and (time.monotonic() - start) >= max_seconds:
+            raise _StopWatch
+
+    async def _run() -> None:
+        try:
+            await engine.stream_to_callback(
+                _on_event,
+                timeout=poll_timeout,
+                limit=limit,
+            )
+        except _StopWatch:
+            print(f"  reached max_seconds={max_seconds}, stopping.")
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        print("\n  Ctrl+C — stopping watch.")
+
+    elapsed = time.monotonic() - start
+    print(f"  handled {count} event(s) in {elapsed:.1f}s "
+          f"(total cached: {len(state.notifications)})")
+
+
+class _StopWatch(Exception):
+    """Internal sentinel to break out of a callback-driven stream."""
+
+
 def _matches_keywords(note: EventNotification, keywords: list[str]) -> bool:
     """Return True when any keyword appears in topic/source/data/op fields."""
     haystack = " ".join([
@@ -632,6 +686,7 @@ State:       cams={n_cams}  event_capable={n_evc}  selected={sel}  subscribed={s
 
   Continuous
     9) Stream notifications (Ctrl+C to stop)
+   15) Watch event types via callback (Ctrl+C to stop)
 
   Introspection
    10) GetServiceCapabilities
@@ -669,6 +724,7 @@ def run() -> None:
         "12": action_show_state,
         "13": action_clear_notifications,
         "14": action_vehicle_detector,
+        "15": action_watch_event_types,
     }
 
     while True:
