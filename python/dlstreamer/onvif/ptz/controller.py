@@ -24,7 +24,7 @@ from typing import List, Optional
 
 from onvif import ONVIFCamera  # pylint: disable=import-error
 
-from .model import PTZCapableProfile, PTZPreset, PTZStatus, PTZVector
+from .types import PTZCapableProfile, PTZPreset, PTZStatus, PTZVector
 
 
 # ---------------------------------------------------------------------------

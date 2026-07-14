@@ -38,7 +38,7 @@ from typing import (
 from onvif import ONVIFCamera  # pylint: disable=import-error
 from onvif.client import ONVIFService  # pylint: disable=import-error
 
-from .model import EventCapableCamera, EventFilter, EventNotification
+from .types import EventCapableCamera, EventFilter, EventNotification
 
 
 # ---------------------------------------------------------------------------

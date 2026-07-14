@@ -29,7 +29,7 @@ from ..event_manager import EventNotification
 from ..event_manager.engine import OnvifEventEngine
 
 from .engine import VideoEngine
-from .model import (
+from .types import (
     CameraIdentity,
     EventRule,
     EventTrigger,

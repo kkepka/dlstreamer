@@ -38,7 +38,7 @@ Controller:
     operations plus their ``*_async`` variants.
 """
 
-from .model import (
+from .types import (
     PTZCapableProfile,
     PTZPreset,
     PTZStatus,

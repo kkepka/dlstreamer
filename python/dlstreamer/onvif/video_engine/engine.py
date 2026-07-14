@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 
 from ..discovery import discover_onvif_cameras
 
-from .model import (
+from .types import (
     CameraEventDefinition,
     CameraIdentity,
     CameraRuntimeState,

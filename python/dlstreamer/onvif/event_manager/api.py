@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Optional
 
-from .model import (
+from .types import (
     EventCapableCamera,
     EventFilter,
     EventNotification,

@@ -27,7 +27,7 @@ from typing import (
 
 from onvif import ONVIFCamera  # pylint: disable=import-error
 
-from .model import EventCapableCamera
+from .types import EventCapableCamera
 
 
 CameraSource = Union[Iterable[dict], AsyncIterable[dict]]

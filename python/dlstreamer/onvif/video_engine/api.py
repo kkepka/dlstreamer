@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from .engine import VideoEngine
-from .model import (
+from .types import (
     CameraEventDefinition,
     CameraIdentity,
     CameraRuntimeState,

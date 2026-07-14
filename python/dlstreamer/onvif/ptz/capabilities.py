@@ -28,7 +28,7 @@ from dlstreamer.onvif.camera_profiles import (
     read_camera_profiles_async,
 )
 
-from .model import PTZCapableProfile
+from .types import PTZCapableProfile
 
 
 CameraSource = Union[Iterable[dict], AsyncIterable[dict]]

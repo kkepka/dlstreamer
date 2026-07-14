@@ -293,7 +293,7 @@ with OnvifEventEngine("10.91.106.65", 2020, "admin", "pass") as eng:
 
 ## video_engine
 
-Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/model.py`
+Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/types.py`
 
 ### Purpose
 
