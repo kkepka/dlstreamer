@@ -22,7 +22,7 @@ flowchart TD
             MEDIA["<b>media_profiles.py</b><br/>_fetch_media_profiles"]
         end
         subgraph Data["Data layer"]
-            PROFILE["<b>profile.py</b><br/>ONVIFProfile"]
+            PROFILE["<b>types.py</b><br/>ONVIFProfile"]
         end
     end
     subgraph External["External"]
@@ -68,7 +68,7 @@ Re-exports the public symbols from `api.py`.
 Declares the module docstring and re-exports `ONVIFProfile`,
 `CameraProfilesResult`, `read_camera_profiles`, `read_camera_profiles_async`.
 
-## 3. `profile.py` — `ONVIFProfile` (data model)
+## 3. `types.py` — `ONVIFProfile` (data model)
 
 A rich container for a single ONVIF media profile. Implemented as a
 `@dataclass`, so every field is a plain attribute (e.g. `profile.name`,

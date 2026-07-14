@@ -26,7 +26,7 @@ Convenience functions:
     read_camera_profiles_async()  — async generator over discovered cameras
 """
 
-from .profile import ONVIFProfile
+from .types import ONVIFProfile
 from .reader import (
     CameraProfilesResult,
     read_camera_profiles,

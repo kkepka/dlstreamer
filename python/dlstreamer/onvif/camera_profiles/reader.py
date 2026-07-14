@@ -29,7 +29,7 @@ from typing import (
 
 from onvif import ONVIFCamera  # pylint: disable=import-error
 
-from .profile import ONVIFProfile
+from .types import ONVIFProfile
 from .media_profiles import _fetch_media_profiles
 
 

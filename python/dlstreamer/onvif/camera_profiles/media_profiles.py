@@ -11,7 +11,7 @@ media service and populates :class:`ONVIFProfile` instances.
 """
 from typing import List
 
-from .profile import ONVIFProfile
+from .types import ONVIFProfile
 
 
 def _fetch_media_profiles(  # pylint: disable=too-many-statements, too-many-locals, too-many-branches
