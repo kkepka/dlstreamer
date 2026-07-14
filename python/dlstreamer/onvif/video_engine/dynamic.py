@@ -23,7 +23,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from ..event_manager import EventNotification
 from ..event_manager.engine import OnvifEventEngine
@@ -49,7 +49,11 @@ class EventRuleParser:
     format can evolve without touching the runtime classes.
     """
 
-    def parse_rules(self, payload: Any) -> List[EventRule]:
+    def parse_rules(
+        self,
+        payload: Any,
+        pipeline_library: Optional[Dict[str, Any]] = None,
+    ) -> List[EventRule]:
         if isinstance(payload, dict):
             entries = payload.get("rules", [])
         elif isinstance(payload, list):
@@ -57,9 +61,13 @@ class EventRuleParser:
         else:
             raise ValueError("dynamic-rule configuration must be a mapping or a list")
 
-        return [self.parse_rule(entry) for entry in entries]
+        return [self.parse_rule(entry, pipeline_library) for entry in entries]
 
-    def parse_rule(self, entry: Any) -> EventRule:
+    def parse_rule(
+        self,
+        entry: Any,
+        pipeline_library: Optional[Dict[str, Any]] = None,
+    ) -> EventRule:
         if not isinstance(entry, dict):
             raise ValueError("each rule entry must be a mapping")
 
@@ -83,8 +91,17 @@ class EventRuleParser:
         trigger = self._parse_trigger(entry.get("trigger", {}), name)
 
         pipeline = entry.get("pipeline")
+        pipeline_ref = entry.get("pipeline_ref")
+        if pipeline is None and pipeline_ref is not None:
+            if not pipeline_library or pipeline_ref not in pipeline_library:
+                raise ValueError(
+                    f"rule '{name}' references unknown pipeline_ref '{pipeline_ref}'"
+                )
+            pipeline = pipeline_library[pipeline_ref]
         if action in (PipelineAction.ADD, PipelineAction.MODIFY) and pipeline is None:
-            raise ValueError(f"rule '{name}' requires a pipeline for action '{action.value}'")
+            raise ValueError(
+                f"rule '{name}' requires a pipeline or pipeline_ref for action '{action.value}'"
+            )
 
         return EventRule(
             name=str(name),
@@ -160,6 +177,8 @@ class PipelineActionExecutor:
                 rule.pipeline,
                 camera=rule.camera,
                 profile_name=rule.profile_name,
+                username=rule.username,
+                password=rule.password,
             )
         elif action == PipelineAction.REMOVE:
             self._engine.remove_pipeline(rule.target_binding_id)
@@ -175,6 +194,8 @@ class PipelineActionExecutor:
             binding_id=rule.target_binding_id,
             events=(),
             profile_name=rule.profile_name,
+            username=rule.username,
+            password=rule.password,
         )
 
 
@@ -252,6 +273,12 @@ class DynamicPipelineController:
 
     Groups rules by camera, runs one :class:`CameraEventWorker` per camera and
     dispatches each notification through the matcher and the executor.
+
+    ONVIF PullPoint notifications carry no unique event id and cameras commonly
+    re-send the *current* property state on every poll. To avoid running an
+    action repeatedly for the same event, the controller tracks the last seen
+    state per ``(camera, topic, source)`` and only evaluates rules when that
+    state actually changes (a real transition), ignoring identical repeats.
     """
 
     def __init__(self, engine: VideoEngine, *, verbose: bool = False) -> None:
@@ -265,6 +292,17 @@ class DynamicPipelineController:
         self._rules: List[EventRule] = []
         self._workers: Dict[str, CameraEventWorker] = {}
         self._stop_event = threading.Event()
+        # Last observed property state per (camera, topic, source); used to
+        # de-duplicate repeated notifications so actions fire only on change.
+        self._last_states: Dict[Any, tuple] = {}
+        self._default_username: str = ""
+        self._default_password: str = ""
+        self._pipeline_library: Dict[str, Any] = {}
+
+    def set_default_credentials(self, username: str, password: str) -> None:
+        """Set fallback ONVIF credentials used when a rule omits them."""
+        self._default_username = username or ""
+        self._default_password = password or ""
 
     def add_rule(self, rule: EventRule) -> None:
         if rule.action in (PipelineAction.ADD, PipelineAction.MODIFY) and rule.pipeline is None:
@@ -277,12 +315,32 @@ class DynamicPipelineController:
             self.add_rule(rule)
 
     def load_rules(self, config_path: str | Path) -> List[EventRule]:
-        """Load event->action rules from a JSON file and register them."""
+        """Load event->action rules from a JSON file and register them.
+
+        Rules may embed their pipeline inline or reference a named pipeline via
+        ``pipeline_ref`` resolved from the pipeline library previously loaded
+        with :meth:`load_pipeline_library`.
+        """
         path = Path(config_path)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        rules = self._parser.parse_rules(payload)
+        rules = self._parser.parse_rules(payload, self._pipeline_library)
         self.add_rules(rules)
         return rules
+
+    def load_pipeline_library(self, config_path: str | Path) -> Dict[str, Any]:
+        """Load named pipeline definitions referenced by rule ``pipeline_ref``.
+
+        The file is a mapping ``{"pipelines": {id: pipeline}}`` (or a bare
+        ``{id: pipeline}`` mapping) where each pipeline is a command list or
+        string. Cameras live in the rules, not here.
+        """
+        path = Path(config_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        library = payload.get("pipelines", payload) if isinstance(payload, dict) else payload
+        if not isinstance(library, dict):
+            raise ValueError("pipeline library must be a mapping of id -> pipeline")
+        self._pipeline_library = {str(key): pipeline_list(value) for key, value in library.items()}
+        return self._pipeline_library
 
     def list_rules(self) -> List[EventRule]:
         with self._lock:
@@ -292,6 +350,7 @@ class DynamicPipelineController:
         """Start one event worker per camera referenced by the rules."""
         self._stop_event.clear()
         with self._lock:
+            self._last_states.clear()
             cameras = self._cameras_by_key()
             for key, (camera, username, password) in cameras.items():
                 worker = self._workers.get(key)
@@ -313,6 +372,7 @@ class DynamicPipelineController:
         with self._lock:
             workers = list(self._workers.values())
             self._workers.clear()
+            self._last_states.clear()
         for worker in workers:
             if worker.is_alive():
                 worker.join(timeout=2.0)
@@ -322,16 +382,66 @@ class DynamicPipelineController:
         for rule in self._rules:
             key = rule.camera.key()
             if key not in cameras:
-                cameras[key] = (rule.camera, rule.username, rule.password)
+                username = rule.username or self._default_username
+                password = rule.password or self._default_password
+                cameras[key] = (rule.camera, username, password)
         return cameras
 
+    @staticmethod
+    def _event_state_key(camera: CameraIdentity, notification: EventNotification) -> tuple:
+        """Identity of the *thing* a notification is about (not its value).
+
+        Combines camera, ONVIF topic and the notification ``Source`` items so
+        that state changes are tracked independently per source/channel.
+        """
+        source = tuple(sorted(notification.source.items()))
+        return (camera.key(), notification.topic, source)
+
+    @staticmethod
+    def _event_state_value(notification: EventNotification) -> tuple:
+        """The current property state, excluding the ever-changing timestamp.
+
+        ``utc_time`` is intentionally ignored so that a camera re-sending the
+        same state produces an identical value and is treated as a duplicate.
+        """
+        data = tuple(sorted(notification.data.items()))
+        return (notification.property_operation, data)
+
+    def _is_duplicate_event(self, camera: CameraIdentity, notification: EventNotification) -> bool:
+        """Return True when this notification repeats the last seen state.
+
+        Updates the stored state as a side effect, so a genuine transition
+        (e.g. motion true -> false -> true) is not suppressed.
+        """
+        key = self._event_state_key(camera, notification)
+        value = self._event_state_value(notification)
+        with self._lock:
+            if self._last_states.get(key) == value:
+                return True
+            self._last_states[key] = value
+        return False
+
     def _dispatch(self, camera: CameraIdentity, notification: EventNotification) -> None:
+        if self._is_duplicate_event(camera, notification):
+            if self._verbose:
+                print(
+                    f"[dynamic] duplicate event ignored: {notification.topic or '<unknown>'} "
+                    f"op={notification.property_operation or '-'}"
+                )
+            return
         with self._lock:
             rules = [rule for rule in self._rules if rule.camera.key() == camera.key()]
         for rule in rules:
             if not self._matcher.matches(rule, notification):
                 continue
             try:
+                if self._verbose:
+                    print(
+                        f"[dynamic] rule '{rule.name}' matched event "
+                        f"{notification.topic or '<unknown>'} "
+                        f"op={notification.property_operation or '-'} — "
+                        f"executing action '{rule.action.value}'"
+                    )
                 self._executor.execute(rule)
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 if self._verbose:

@@ -304,7 +304,7 @@ Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/model.py`
 | Type | Description |
 |---|---|
 | CameraIdentity | Normalized camera key (hostname, port, optional MAC) used for matching and state tracking. |
-| PipelineBinding | Configured DL Streamer pipeline associated with a `CameraIdentity` (binding_id, pipeline command, optional events, optional profile_name). |
+| PipelineBinding | Configured DL Streamer pipeline associated with a `CameraIdentity` (binding_id, pipeline command, optional events, optional profile_name, optional username/password used for `{rtsp_url}` resolution). |
 | CameraRuntimeState | Live state for a discovered camera (status, last_seen, active pipeline binding IDs, error). |
 | VideoEngineEvent | Callback payload emitted by the engine (kind, camera, details, timestamp). |
 | CameraEventDefinition | ONVIF event definition attached to a camera (name, camera, topic_filter, renew_every, metadata). |
@@ -379,7 +379,12 @@ These behave identically to the originals; see the [camera_profiles](#camera_pro
 
 ### Data contracts
 
-JSON configuration file — top-level shape (either a mapping or a plain list of entries):
+The `video_engine` module works with two JSON files that separate **pipeline
+definitions** from the **cameras/rules** that use them.
+
+**1. Engine binding config** (`VideoEngine.load_config`) — camera bindings with an
+inline pipeline (a mapping or a plain list of entries). Each entry may carry
+`username`/`password` used to resolve the `{rtsp_url}` placeholder:
 
 ```json
 {
@@ -389,6 +394,8 @@ JSON configuration file — top-level shape (either a mapping or a plain list of
       "camera": {"hostname": "10.0.0.15", "port": 80, "mac": null},
       "profile_name": "MainStream",
       "events": [],
+      "username": "admin",
+      "password": "secret",
       "pipeline": [
         "gst-launch-1.0", "-v", "rtspsrc", "location={rtsp_url}", "!",
         "rtph264depay", "!", "h264parse", "!", "avdec_h264", "!",
@@ -399,9 +406,45 @@ JSON configuration file — top-level shape (either a mapping or a plain list of
 }
 ```
 
+**2. Pipeline library + rules** (used by `DynamicPipelineController`) — pipelines
+are defined **once** in a library (no cameras) and referenced by id from rules
+(which hold the cameras). Load the library with `load_pipeline_library()`, then
+the rules with `load_rules()`:
+
+```json
+// video_engine_pipelines.json — definitions only (no cameras)
+{ "pipelines": {
+    "move_detected_ball_test": [
+      "gst-launch-1.0", "-v", "videotestsrc", "pattern=ball", "!",
+      "videoconvert", "!", "gvawatermark",
+      "displ-cfg=ff-custom-txt='Move detected'", "!",
+      "videoconvert", "!", "autovideosink"
+    ]
+} }
+```
+
+```json
+// video_engine_rules.json — cameras + pipeline_ref
+{ "rules": [
+    {
+      "name": "run-ball-test-on-motion",
+      "camera": { "hostname": "10.91.106.65", "port": 2020 },
+      "trigger": { "data_equals": { "IsMotion": "true" } },
+      "action": "add",
+      "target_binding_id": "move_detected_ball_test",
+      "pipeline_ref": "move_detected_ball_test",
+      "username": "admin", "password": "r00tme"
+    }
+] }
+```
+
+An unknown `pipeline_ref` raises a `ValueError` at load time. When a rule/binding
+omits `username`/`password`, the engine and controller fall back to the defaults
+set with `set_default_credentials(user, pass)`.
+
 The `{rtsp_url}` placeholder is resolved at pipeline-start time using ONVIF `GetStreamUri` with `profile_name`.
 
-`PipelineBinding.to_dict()` shape (used by `list_camera_pipeline_pairs` and `get_pipeline_for_camera`):
+`PipelineBinding.to_dict()` shape (used by `list_camera_pipeline_pairs` and `get_pipeline_for_camera`) — note that `username`/`password` are **not** serialized:
 
 ```python
 {
@@ -429,27 +472,49 @@ The `{rtsp_url}` placeholder is resolved at pipeline-start time using ONVIF `Get
 
 ## video_engine_test_app
 
-### Uruchomienie
+### Running
 
-Wszystkie poniższe komendy należy wykonywać z katalogu głównego repozytorium (`dlstreamer/`):
+Run all commands below from the repository root (`dlstreamer/`):
 
 ```bash
 cd /path/to/dlstreamer
 
-# 1. Utwórz i aktywuj środowisko wirtualne (jednorazowo)
+# 1. Create and activate a virtual environment (one-time)
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. Zainstaluj pakiet (jednorazowo)
+# 2. Install the package (one-time)
 pip install -e python/
 
-# 3. Ustaw zmienne środowiskowe
+# 3. Set environment variables
 export ONVIF_USER="admin"
 export ONVIF_PASSWORD="secret"
 
-# 4. Uruchom aplikację
+# 4. Run the application
 python -m dlstreamer.onvif.video_engine_test_app
 
-# lub z własnym plikiem konfiguracyjnym
+# or with a custom configuration file
 python -m dlstreamer.onvif.video_engine_test_app --config /path/to/video_engine_pipelines.json
 ```
+
+### Configuration files
+
+The application uses two files with separated responsibilities:
+
+- `video_engine_pipelines.json` — the **pipeline library** (`id → definition`),
+  with no camera information. Loaded via menu option **1) Load pipeline library**.
+- `video_engine_rules.json` — the **rules**: cameras + trigger + a `pipeline_ref`
+  pointing at a pipeline in the library. Loaded via **13) Load dynamic rules**,
+  then **14) Start dynamic pipeline control** starts listening for events.
+
+This way a pipeline is defined only once, and the rules merely reference it.
+
+### Credentials (username / password)
+
+- **Menu option 17) Configure ONVIF credentials** — prompts interactively for the
+  username and password (`getpass`); they become the defaults for the engine and
+  controller (fallback used when a binding/rule has none of its own).
+- Alternatively: the `username`/`password` fields in a rule (or binding), or the
+  `ONVIF_USER` / `ONVIF_PASSWORD` environment variables (used, among others, by
+  options 11 — profiles and 12 — preview). The password is not serialized by
+  `to_dict()`.

@@ -70,9 +70,11 @@ Declares the module docstring and re-exports `ONVIFProfile`,
 
 ## 3. `profile.py` — `ONVIFProfile` (data model)
 
-A rich container for a single ONVIF media profile. It stores connection details
-(`ip`, `port`, `username`, `password`, `mac_address`) plus four configuration
-categories, exposed via property accessors:
+A rich container for a single ONVIF media profile. Implemented as a
+`@dataclass`, so every field is a plain attribute (e.g. `profile.name`,
+`profile.rtsp_url`; `ip` is kept as an alias of `ip_address`). It stores
+connection details (`ip`, `port`, `username`, `password`, `mac_address`) plus
+these configuration categories:
 
 - **ONVIF Profile**: `name`, `token`, `fixed`, `rtsp_url`.
 - **Video Source Configuration (VSC)**: `vsc_name`, `vsc_token`, `vsc_bounds`, …

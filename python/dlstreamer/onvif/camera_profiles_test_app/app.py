@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import time
+from dataclasses import fields
 from typing import Iterable, Optional
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -162,6 +163,50 @@ def _print_result(result: CameraProfilesResult) -> None:
     mac_info = f"  MAC={result.mac_address}" if result.mac_address else ""
     print(f"  [ OK ] {camera_id}: {len(result.profiles)} profile(s){mac_info}")
     _print_profiles(result.profiles, camera_id)
+
+
+# Grouped layout for the full profile dump. Any field not listed here is still
+# printed under "Other", so new ONVIFProfile fields are never silently dropped.
+_PROFILE_DETAIL_GROUPS = [
+    ("Connection", ["ip_address", "port", "username", "password", "mac_address"]),
+    ("Profile", ["name", "token", "fixed", "rtsp_url",
+                 "video_source_configuration", "video_encoder_configuration"]),
+    ("Video Source Configuration (VSC)",
+     ["vsc_name", "vsc_token", "vsc_source_token", "vsc_bounds"]),
+    ("Video Encoder Configuration (VEC)",
+     ["vec_name", "vec_token", "vec_encoding", "vec_resolution", "vec_quality",
+      "vec_rate_control", "vec_multicast", "vec_framerate_limit", "vec_bitrate_limit",
+      "vec_encoding_interval", "vec_h264_profile", "vec_h264_gop_length",
+      "vec_mpeg4_profile", "vec_mpeg4_gop_length"]),
+    ("Audio Source Configuration (ASC)",
+     ["asc_name", "asc_token", "asc_source_token"]),
+    ("Audio Encoder Configuration (AEC)",
+     ["aec_name", "aec_token", "aec_encoding", "aec_bitrate", "aec_sample_rate"]),
+    ("PTZ Configuration", ["ptz_name", "ptz_token", "ptz_node_token"]),
+]
+
+
+def _print_profile_details(index: int, p: ONVIFProfile) -> None:
+    """Print every field of a single :class:`ONVIFProfile`, grouped and complete."""
+    print(f"\n  --- Profile #{index}: {p.name or '-'} (token={p.token or '-'}) ---")
+    shown: set[str] = set()
+
+    def _fmt(field_name: str) -> None:
+        value = getattr(p, field_name)
+        if field_name == "password":
+            value = ("*" * len(str(value))) if value else ""
+        print(f"    {field_name:26} = {value!r}")
+        shown.add(field_name)
+
+    for title, names in _PROFILE_DETAIL_GROUPS:
+        print(f"    [{title}]")
+        for name in names:
+            _fmt(name)
+    remaining = [f.name for f in fields(p) if f.name not in shown]
+    if remaining:
+        print("    [Other]")
+        for name in remaining:
+            _fmt(name)
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +685,22 @@ def action_show_state(state: TestAppState) -> None:
             _print_profiles(r.profiles, camera_id)
 
 
+def action_show_all_details(state: TestAppState) -> None:
+    """Print the full set of fields for every cached profile."""
+    print("\n-- Full profile details --")
+    if not state.results:
+        print("  No cached profile results. Read profiles first (options 4-8).")
+        return
+    for camera_id, r in state.results.items():
+        if not r.ok:
+            print(f"\n  [FAIL] {camera_id}: {r.error}")
+            continue
+        mac_info = f"  MAC={r.mac_address}" if r.mac_address else ""
+        print(f"\n=== {camera_id} — {len(r.profiles)} profile(s){mac_info} ===")
+        for i, profile in enumerate(r.profiles, 1):
+            _print_profile_details(i, profile)
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -662,6 +723,7 @@ State:       cached cameras={n_cams}  profile results={n_results}  players={n_pl
   9) Show current state
  10) Play RTSP stream from a cached profile (non-blocking)
  11) Stop all background RTSP players
+ 12) Show ALL profile details (full field dump)
   0) Exit
 
 > """
@@ -719,6 +781,8 @@ def run() -> None:
                 action_play_rtsp(state)
             elif choice == "11":
                 action_stop_players(state)
+            elif choice == "12":
+                action_show_all_details(state)
             else:
                 print(f"  Unknown choice: {choice!r}")
         except KeyboardInterrupt:

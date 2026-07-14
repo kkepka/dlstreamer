@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 from dataclasses import asdict
@@ -49,9 +50,16 @@ class TestAppState:
             cwd_config = Path.cwd() / "video_engine_pipelines.json"
             if cwd_config.exists():
                 self.config_path = cwd_config
-        self.engine: VideoEngine = create_video_engine(self.config_path, verbose=True)
+        self.engine: VideoEngine = create_video_engine(verbose=True)
         self.controller: DynamicPipelineController = create_dynamic_controller(self.engine, verbose=True)
         self.rules_path = DEFAULT_RULES_PATH
+        self.pipeline_library: dict[str, Any] = {}
+        if self.config_path.exists():
+            self.pipeline_library = self.controller.load_pipeline_library(self.config_path)
+        self.username = os.environ.get("ONVIF_USER", "")
+        self.password = os.environ.get("ONVIF_PASSWORD", "")
+        self.engine.set_default_credentials(self.username, self.password)
+        self.controller.set_default_credentials(self.username, self.password)
         self.dynamic_active = False
         self.logs: list[dict[str, Any]] = []
         self.discovery_active = False
@@ -148,6 +156,17 @@ def _rows_for_pipelines(pipelines: list[dict[str, Any]]) -> list[list[str]]:
     return rows
 
 
+def _rows_for_pipeline_library(library: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, (pipeline_id, pipeline) in enumerate(library.items(), 1):
+        if isinstance(pipeline, list):
+            command = " ".join(str(token) for token in pipeline)
+        else:
+            command = str(pipeline)
+        rows.append([str(index), str(pipeline_id), command[:120]])
+    return rows
+
+
 def _rows_for_events(events: list[dict[str, Any]]) -> list[list[str]]:
     rows: list[list[str]] = []
     for index, item in enumerate(events, 1):
@@ -181,6 +200,7 @@ def _rows_for_rules(rules: list[Any]) -> list[list[str]]:
                 str(index),
                 str(rule.name),
                 rule.camera.key(),
+                str(rule.camera.hostname),
                 rule.action.value,
                 str(rule.target_binding_id),
                 "; ".join(parts) or "-",
@@ -266,19 +286,40 @@ def _rows_for_json_camera(camera: dict[str, Any], entry: dict[str, Any], index: 
 
 
 def build_json_report(config_path: str | Path) -> str:
-    """Return the JSON configuration as a series of tables, one per camera."""
+    """Return the camera-pipeline mapping from the JSON config as tables.
+
+    Renders one table per camera for the camera-pipeline mapping schema
+    (a list of entries, each carrying a ``camera``).
+
+    If the file is a pipeline library (a mapping ``id -> pipeline``),
+    this option does not render it — it points the user to the dedicated
+    "Show loaded pipeline library" option instead, to avoid duplication.
+
+    The source file name is always shown in the header.
+    """
 
     path = Path(config_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, dict):
-        entries = list(payload.get("pipelines", []))
+        section = payload.get("pipelines", payload)
     elif isinstance(payload, list):
-        entries = list(payload)
+        section = payload
     else:
         raise ValueError("JSON config must be a list or a mapping with a pipelines key")
 
+    lines = [f"JSON configuration source: {path}"]
+
+    # Pipeline library schema: not this option's responsibility.
+    if isinstance(section, dict):
+        lines.append("")
+        lines.append("Schema: pipeline library (id -> pipeline)")
+        lines.append("  This file is a pipeline library, not a camera-pipeline mapping.")
+        lines.append("  Use option 'Show loaded pipeline library' to view its contents.")
+        return "\n".join(lines)
+
+    # Camera-pipeline mapping schema: list of entries carrying a camera.
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for entry in entries:
+    for entry in section:
         if not isinstance(entry, dict):
             continue
         camera = entry.get("camera", entry)
@@ -288,7 +329,8 @@ def build_json_report(config_path: str | Path) -> str:
         group_key = f"{hostname}:{port}:{mac}" if mac else f"{hostname}:{port}"
         grouped.setdefault(group_key, []).append(entry)
 
-    lines = [f"JSON configuration: {path}"]
+    lines.append("")
+    lines.append("Schema: camera-pipeline mapping")
     if not grouped:
         lines.append("  (no cameras)")
         return "\n".join(lines)
@@ -344,7 +386,7 @@ def build_dump_report(state: TestAppState) -> str:
 
     lines.append("")
     lines.append(f"dynamic_control_running: {state.dynamic_active}")
-    lines.append(_render_table("Dynamic event->action rules", ["#", "name", "camera", "action", "target_binding_id", "trigger"], _rows_for_rules(state.controller.list_rules())))
+    lines.append(_render_table("Dynamic event->action rules", ["#", "name", "camera", "ip", "action", "target_binding_id", "trigger"], _rows_for_rules(state.controller.list_rules())))
 
     lines.append("")
     lines.append(_render_table("Logs", ["#", "time", "level", "kind", "camera", "message"], _rows_for_logs(state.logs)))
@@ -390,15 +432,26 @@ def _prompt_list(prompt: str, default: str = "") -> list[str]:
 
 
 def _action_load_config(state: TestAppState) -> None:
-    path = _prompt("Config file", str(state.config_path))
+    path = _prompt("Pipeline library file", str(state.config_path))
     state.config_path = Path(path)
-    state.engine.load_config(state.config_path)
-    state.log_event("INFO", "load_config", "local", {"config_path": str(state.config_path)}, message="configuration loaded")
-    print("Configuration loaded.")
+    library = state.controller.load_pipeline_library(state.config_path)
+    state.pipeline_library = library
+    state.log_event("INFO", "load_pipeline_library", "local", {"config_path": str(state.config_path), "count": len(library)}, message="pipeline library loaded")
+    print(f"Pipeline library loaded ({len(library)} pipeline(s)): {', '.join(library)}")
+
+
+def _action_show_pipeline_library(state: TestAppState) -> None:
+    state.log_event("INFO", "show_pipeline_library", "local", {"count": len(state.pipeline_library)}, message="pipeline library inspected")
+    print(_render_table(
+        "Loaded pipeline library",
+        ["#", "pipeline_id", "command"],
+        _rows_for_pipeline_library(state.pipeline_library),
+    ))
 
 
 def _action_add_pipeline(state: TestAppState) -> None:
     hostname = _prompt("Camera hostname/ip")
+    print("  Hint: use the camera's configured ONVIF service port, not necessarily 80 (e.g. 2020 for this camera).")
     port = _prompt_int("Camera port", 80)
     mac = _prompt("MAC address (optional)", "") or None
     binding_id = _prompt("Binding id", "") or None
@@ -427,6 +480,7 @@ def _action_add_pipeline(state: TestAppState) -> None:
 
 def _action_add_event(state: TestAppState) -> None:
     hostname = _prompt("Camera hostname/ip")
+    print("  Hint: use the camera's configured ONVIF service port, not necessarily 80 (e.g. 2020 for this camera).")
     port = _prompt_int("Camera port", 80)
     mac = _prompt("MAC address (optional)", "") or None
     name = _prompt("Event name")
@@ -526,17 +580,43 @@ def _action_show_rules(state: TestAppState) -> None:
     print(f"dynamic_control_running: {state.dynamic_active}")
     print(_render_table(
         "Dynamic event->action rules",
-        ["#", "name", "camera", "action", "target_binding_id", "trigger"],
+        ["#", "name", "camera", "ip", "action", "target_binding_id/pipeline_id", "trigger"],
         _rows_for_rules(state.controller.list_rules()),
     ))
+
+
+def _action_configure_credentials(state: TestAppState) -> None:
+    """Prompt for ONVIF username/password and use them as engine-wide defaults.
+
+    The credentials become the fallback for any pipeline binding or event
+    rule that does not carry its own, and are used by the profile/preview
+    actions. The password is read via getpass so it is not echoed.
+    """
+    print("\n-- Configure ONVIF credentials --")
+    username = _prompt("ONVIF username", state.username or None)
+    if username == "__cancel__":
+        return
+    masked = "*" * len(state.password) if state.password else ""
+    try:
+        password = getpass.getpass(f"ONVIF password [{masked}]: ")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    state.username = username
+    if password:
+        state.password = password
+    state.engine.set_default_credentials(state.username, state.password)
+    state.controller.set_default_credentials(state.username, state.password)
+    state.log_event("INFO", "configure_credentials", "local", {"username": state.username}, message="ONVIF credentials configured")
+    print(f"Credentials set: user='{state.username or '-'}', password={len(state.password)} chars.")
 
 
 def _collect_all_profiles(
     state: TestAppState,
 ) -> list[tuple[str, int, Any]]:
     """Return a flat list of (hostname, port, ONVIFProfile) for all active cameras."""
-    username = os.environ.get("ONVIF_USER", "")
-    password = os.environ.get("ONVIF_PASSWORD", "")
+    username = state.username
+    password = state.password
     active = state.engine.get_active_cameras()
     if not active:
         return []
@@ -554,10 +634,10 @@ def _collect_all_profiles(
 def _action_list_camera_profiles(state: TestAppState) -> None:
     active = state.engine.get_active_cameras()
     if not active:
-        print("No active cameras. Start discovery first (option 5).")
+        print("No active cameras. Start discovery first (option 10).")
         return
-    username = os.environ.get("ONVIF_USER", "")
-    password = os.environ.get("ONVIF_PASSWORD", "")
+    username = state.username
+    password = state.password
     cameras = [{"hostname": item["camera"]["hostname"], "port": item["camera"]["port"]} for item in active]
     print()
     for result in read_camera_profiles(cameras, username=username, password=password):
@@ -577,7 +657,7 @@ def _action_list_camera_profiles(state: TestAppState) -> None:
 def _action_preview_stream(state: TestAppState) -> None:
     active = state.engine.get_active_cameras()
     if not active:
-        print("No active cameras. Start discovery first (option 5).")
+        print("No active cameras. Start discovery first (option 10).")
         return
 
     print(f"  Reading profiles from {len(active)} camera(s)...", end="\r")
@@ -622,8 +702,8 @@ def _action_preview_stream(state: TestAppState) -> None:
         print("Selected profile has no RTSP URL.")
         return
 
-    username = os.environ.get("ONVIF_USER", "")
-    password = os.environ.get("ONVIF_PASSWORD", "")
+    username = state.username
+    password = state.password
     if username and password and "@" not in rtsp_url:
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(rtsp_url)
@@ -663,61 +743,67 @@ def run(argv: Optional[list[str]] = None) -> None:
         while True:
             print()
             print("video_engine test app")
-            print("1) Load config")
-            print("2) Add camera-pipeline mapping")
-            print("3) Add ONVIF event definition")
-            print("4) Set discovery interval and timeout")
-            print("5) Start discovery and pipeline orchestration")
-            print("6) Stop discovery and pipelines")
-            print("7) Dump current state")
-            print("8) Show JSON camera-pipeline mapping")
-            print("9) Check environment variables")
-            print("10) Clear logs")
-            print("11) List camera profiles")
-            print("12) Preview stream")
-            print("13) Load dynamic event->action rules")
-            print("14) Start dynamic pipeline control (event-driven)")
-            print("15) Stop dynamic pipeline control")
-            print("16) Show dynamic rules")
-            print("17) Quit")
+            print("1) Configure ONVIF credentials")
+            print("2) Load pipeline json file")
+            print("3) Show loaded pipeline library")
+            print("4) Load dynamic event->action rules")
+            print("5) Show dynamic event->action rules")
+            print("6) Add camera-pipeline mapping")
+            print("7) Show JSON camera-pipeline mapping")
+            print("8) Add ONVIF event definition")
+            print("9) Set discovery interval and timeout")
+            print("10) Start discovery and pipeline orchestration")
+            print("11) Stop discovery and pipelines")
+            print("12) Start dynamic pipeline control (event-driven)")
+            print("13) Stop dynamic pipeline control")
+            print("14) Dump current state")
+            print("15) Check environment variables")
+            print("16) Clear logs")
+            print("17) List camera profiles")
+            print("18) Preview stream")
+            print("19) Quit")
 
             choice = _prompt("Select option")
             if choice == "__cancel__":
                 break
             os.system("clear")
             if choice == "1":
-                _action_load_config(state)
+                _action_configure_credentials(state)
             elif choice == "2":
-                _action_add_pipeline(state)
+                _action_load_config(state)
             elif choice == "3":
-                _action_add_event(state)
+                _action_show_pipeline_library(state)
             elif choice == "4":
-                _action_set_timers(state)
-            elif choice == "5":
-                _action_start(state)
-            elif choice == "6":
-                _action_stop(state)
-            elif choice == "7":
-                _action_dump(state)
-            elif choice == "8":
-                _action_show_json(state)
-            elif choice == "9":
-                _action_check_environment(state)
-            elif choice == "10":
-                _action_clear_logs(state)
-            elif choice == "11":
-                _action_list_camera_profiles(state)
-            elif choice == "12":
-                _action_preview_stream(state)
-            elif choice == "13":
                 _action_load_rules(state)
-            elif choice == "14":
-                _action_start_dynamic(state)
-            elif choice == "15":
-                _action_stop_dynamic(state)
-            elif choice == "16":
+            elif choice == "5":
                 _action_show_rules(state)
+            elif choice == "6":
+                _action_add_pipeline(state)
+            elif choice == "7":
+                _action_show_json(state)
+            elif choice == "8":
+                _action_add_event(state)
+            elif choice == "9":
+                _action_set_timers(state)
+            elif choice == "10":
+                _action_start(state)
+            elif choice == "11":
+                _action_stop(state)
+            elif choice == "12":
+                _action_start_dynamic(state)
+            elif choice == "13":
+                _action_stop_dynamic(state)
+            elif choice == "14":
+                _action_dump(state)
+            elif choice == "15":
+                _action_check_environment(state)
+            elif choice == "16":
+                _action_clear_logs(state)
             elif choice == "17":
+                _action_list_camera_profiles(state)
+            elif choice == "18":
+                _action_preview_stream(state)
+            elif choice == "19":
                 break
             else:
                 print("Unknown option.")

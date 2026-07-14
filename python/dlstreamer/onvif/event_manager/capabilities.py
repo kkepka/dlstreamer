@@ -51,17 +51,7 @@ def is_event_capable(
     (network, auth, missing service) yields ``False`` — the intent is a
     quick capability check, not a fault report.
     """
-    try:
-        client = ONVIFCamera(hostname, int(port), username, password)
-        client.create_events_service().GetServiceCapabilities()
-        return True
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        if verbose:
-            print(
-                f"[WARN] {hostname}:{port} events probe failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-        return False
+    return _probe(hostname, int(port), username, password, verbose).ok
 
 
 def _probe(

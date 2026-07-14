@@ -265,6 +265,8 @@ def action_pick_camera(state: TestAppState) -> None:
         # allow direct entry if discovery hasn't been run
         print("  No cached event-capable cameras. Enter host:port manually "
               "or run option 2/3 first.")
+        print("  Hint: the port is the camera's configured ONVIF service port, "
+              "not necessarily 80 (e.g. 2020 for this camera).")
         raw = _prompt("host:port (blank = cancel)")
         if not raw or ":" not in raw:
             return

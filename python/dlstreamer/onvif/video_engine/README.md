@@ -73,7 +73,7 @@ no business logic — only data and light normalization.
 | Class | Role |
 |-------|------|
 | `CameraIdentity` | Normalized camera key (`hostname:port:MAC`). MAC normalized to uppercase with `:` |
-| `PipelineBinding` | Association of a pipeline with a camera (+ `binding_id`, events, profile) |
+| `PipelineBinding` | Association of a pipeline with a camera (+ `binding_id`, events, profile, optional `username`/`password` for RTSP-URL resolution) |
 | `CameraRuntimeState` | Live camera state (`discovered`/`matched`, `last_seen`, assigned bindings) |
 | `VideoEngineEvent` | Callback payload emitted by the engine |
 | `CameraEventDefinition` | ONVIF event definition attached to a camera |
@@ -98,6 +98,8 @@ classDiagram
         binding_id: str
         events: tuple
         profile_name: str
+        username: str
+        password: str
         to_dict()
     }
     class EventRule {
@@ -157,7 +159,9 @@ background threads:
 
 Pipelines are launched as processes (`subprocess.Popen`), logging to
 `/tmp/video_engine_pipeline_*.log`. It supports the `{rtsp_url}` placeholder,
-resolved from the camera profile (`camera_profiles.read_camera_profiles`).
+resolved from the camera profile (`camera_profiles.read_camera_profiles`) using
+the binding's `username`/`password` (or the engine defaults set with
+`set_default_credentials`).
 
 ### Flow chart — discovery and reaper loops
 
@@ -238,11 +242,51 @@ small classes (single responsibility):
 
 | Class | Responsibility |
 |-------|----------------|
-| `EventRuleParser` | Deserialize rules from dict/JSON → `EventRule` |
+| `EventRuleParser` | Deserialize rules from dict/JSON → `EventRule`; resolves `pipeline_ref` against the pipeline library |
 | `EventRuleMatcher` | Pure (stateless) matching of a notification against a trigger |
 | `PipelineActionExecutor` | Map `PipelineAction` → `VideoEngine` call |
 | `CameraEventWorker` | Thread pulling ONVIF events for a **single** camera |
 | `DynamicPipelineController` | Orchestration: groups rules per camera, runs workers, dispatch |
+
+### Configuration files (two-file model)
+
+Pipeline definitions and the camera/event bindings live in **separate** files so a
+pipeline is defined once and referenced by id:
+
+- **Pipeline library** (`video_engine_pipelines.json`) — a mapping of
+  `id → pipeline` (command list or string). **No camera information.**
+  Loaded with `DynamicPipelineController.load_pipeline_library(path)`.
+
+  ```json
+  { "pipelines": {
+      "move_detected_ball_test": [
+        "gst-launch-1.0", "-v", "videotestsrc", "pattern=ball", "!",
+        "videoconvert", "!", "gvawatermark",
+        "displ-cfg=ff-custom-txt='Move detected'", "!",
+        "videoconvert", "!", "autovideosink"
+      ]
+  } }
+  ```
+
+- **Rules** (`video_engine_rules.json`) — cameras + triggers + a `pipeline_ref`
+  pointing at a pipeline in the library (an inline `pipeline` is still accepted).
+  Loaded with `DynamicPipelineController.load_rules(path)` after the library.
+
+  ```json
+  {
+    "name": "run-ball-test-on-motion",
+    "camera": { "hostname": "10.91.106.65", "port": 2020 },
+    "trigger": { "data_equals": { "IsMotion": "true" } },
+    "action": "add",
+    "target_binding_id": "move_detected_ball_test",
+    "pipeline_ref": "move_detected_ball_test",
+    "username": "admin", "password": "r00tme"
+  }
+  ```
+
+**Credentials**: each rule/binding may carry its own `username`/`password` (used
+for event subscription and `{rtsp_url}` resolution). When omitted, the engine and
+controller fall back to defaults set via `set_default_credentials(user, pass)`.
 
 ### Flow chart — rule dispatch
 

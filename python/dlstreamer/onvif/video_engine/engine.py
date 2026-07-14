@@ -60,6 +60,8 @@ class VideoEngine:
         self._camera_states: Dict[str, CameraRuntimeState] = {}
         self._active_processes: Dict[str, subprocess.Popen[Any]] = {}
         self._callbacks: list[CallbackType] = []
+        self._default_username: str = ""
+        self._default_password: str = ""
 
         if self._config_path is not None:
             self.load_config(self._config_path)
@@ -135,6 +137,14 @@ class VideoEngine:
 
     def getDiscoveryTime(self) -> int:
         return self._discovery_time
+
+    def set_default_credentials(self, username: str, password: str) -> None:
+        """Set fallback ONVIF credentials for profile (RTSP URL) resolution.
+
+        Used when a pipeline binding does not carry its own credentials.
+        """
+        self._default_username = username or ""
+        self._default_password = password or ""
 
     def register_callback(self, callback: CallbackType) -> None:
         with self._lock:
@@ -236,6 +246,8 @@ class VideoEngine:
         camera: CameraIdentity | None = None,
         profile_name: str | None = None,
         events: Iterable[str] | None = None,
+        username: str | None = None,
+        password: str | None = None,
         start: bool = True,
     ) -> PipelineBinding:
         """Restart-based modification: stop, swap the command, start again.
@@ -257,7 +269,17 @@ class VideoEngine:
             else (current.events if current is not None else ())
         )
         resolved_profile = profile_name if profile_name is not None else (current.profile_name if current else None)
-        new_binding = PipelineBinding(target_camera, pipeline_list(pipeline), binding_id, event_tuple, resolved_profile)
+        resolved_username = username if username is not None else (current.username if current else "")
+        resolved_password = password if password is not None else (current.password if current else "")
+        new_binding = PipelineBinding(
+            target_camera,
+            pipeline_list(pipeline),
+            binding_id,
+            event_tuple,
+            resolved_profile,
+            resolved_username,
+            resolved_password,
+        )
 
         with self._lock:
             self._bindings = [b for b in self._bindings if b.binding_id != binding_id]
@@ -314,7 +336,19 @@ class VideoEngine:
             binding_id = str(entry.get("binding_id") or entry.get("pipeline_id") or f"{identity.key()}:{index}")
             events = tuple(str(item) for item in entry.get("events", []))
             profile_name = entry.get("profile_name")
-            bindings.append(PipelineBinding(identity, pipeline_list(pipeline_value), binding_id, events, profile_name))
+            username = str(entry.get("username", ""))
+            password = str(entry.get("password", ""))
+            bindings.append(
+                PipelineBinding(
+                    identity,
+                    pipeline_list(pipeline_value),
+                    binding_id,
+                    events,
+                    profile_name,
+                    username,
+                    password,
+                )
+            )
         return bindings
 
     def _binding_matches(self, binding: PipelineBinding, identity: CameraIdentity) -> bool:
@@ -468,7 +502,9 @@ class VideoEngine:
             print(f"[video_engine] Resolving {{rtsp_url}} placeholder for profile '{binding.profile_name}'")
 
         # Try to resolve RTSP URL from camera profile
-        rtsp_url = self._get_profile_rtsp_url(binding.camera, binding.profile_name)
+        rtsp_url = self._get_profile_rtsp_url(
+            binding.camera, binding.profile_name, binding.username, binding.password
+        )
         if rtsp_url is None:
             if self._verbose:
                 print(f"[video_engine] ERROR: Could not resolve RTSP URL for profile {binding.profile_name}")
@@ -483,12 +519,18 @@ class VideoEngine:
         else:
             return tuple(str(c).replace("{rtsp_url}", rtsp_url) for c in command)
 
-    def _get_profile_rtsp_url(self, camera: CameraIdentity, profile_name: str) -> Optional[str]:
+    def _get_profile_rtsp_url(
+        self,
+        camera: CameraIdentity,
+        profile_name: str,
+        username: str = "",
+        password: str = "",
+    ) -> Optional[str]:
         """Get RTSP URL for a specific profile from camera profile data."""
         try:
             from ..camera_profiles import read_camera_profiles
-            username = ""
-            password = ""
+            username = username or self._default_username
+            password = password or self._default_password
             cameras = [{"hostname": camera.hostname, "port": camera.port}]
             for result in read_camera_profiles(cameras, username=username, password=password):
                 if not result.ok:

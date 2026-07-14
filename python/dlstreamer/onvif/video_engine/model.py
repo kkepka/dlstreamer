@@ -44,6 +44,8 @@ class PipelineBinding:
     binding_id: str
     events: Tuple[str, ...] = field(default_factory=tuple)
     profile_name: Optional[str] = None
+    username: str = ""
+    password: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
