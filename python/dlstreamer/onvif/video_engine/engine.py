@@ -15,6 +15,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from ..discovery import discover_onvif_cameras
 from ..camera_profiles import read_camera_profiles
@@ -783,8 +784,20 @@ class VideoEngine:
     def _start_pipeline_if_needed(self, binding: PipelineBinding) -> None:
         binding_key = binding.binding_id
         with self._lock:
-            if binding_key in self._active_processes:
-                return
+            existing = self._active_processes.get(binding_key)
+            if existing is not None:
+                if existing.poll() is None:
+                    # A live process is already running for this binding.
+                    return
+                # The previous process has exited; drop the stale entry so the
+                # binding can be respawned (e.g. camera reconnect, changed
+                # profile, or a pipeline that crashed on its own).
+                self._active_processes.pop(binding_key, None)
+                if self._verbose:
+                    print(
+                        f"[video_engine] Previous pipeline for '{binding_key}' "
+                        f"exited (code {existing.poll()}); respawning."
+                    )
 
         process = self._spawn_pipeline(binding)
         with self._lock:
@@ -888,13 +901,42 @@ class VideoEngine:
                 available.append(profile.name)
                 if profile.name == profile_name:
                     if profile.rtsp_url:
-                        return profile.rtsp_url, ""
+                        url = self._inject_rtsp_credentials(profile.rtsp_url, username, password)
+                        return url, ""
                     return None, f"profile '{profile_name}' on {target} has no RTSP URL"
 
         names = ", ".join(repr(name) for name in available) or "(none)"
         return None, (
             f"no profile named '{profile_name}' on {target}; "
             f"available profiles: {names} (names are case-sensitive)"
+        )
+
+    @staticmethod
+    def _inject_rtsp_credentials(rtsp_url: str, username: str, password: str) -> str:
+        """Return ``rtsp_url`` with ``username``/``password`` embedded in it.
+
+        ONVIF cameras report their stream URL without credentials, but the
+        stream itself is typically authenticated. GStreamer ``rtspsrc`` accepts
+        credentials inline as ``rtsp://user:pass@host:port/path``. Userinfo is
+        percent-encoded so special characters in the password are safe. When no
+        credentials are supplied, or the URL already carries userinfo, the URL
+        is returned unchanged.
+        """
+        if not username and not password:
+            return rtsp_url
+        parts = urlsplit(rtsp_url)
+        if "@" in parts.netloc:
+            return rtsp_url
+        host = parts.hostname or ""
+        if not host:
+            return rtsp_url
+        port = f":{parts.port}" if parts.port else ""
+        userinfo = quote(username, safe="")
+        if password:
+            userinfo = f"{userinfo}:{quote(password, safe='')}"
+        netloc = f"{userinfo}@{host}{port}"
+        return urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
         )
 
     def _stop_pipeline(self, binding_id: str) -> None:
