@@ -57,6 +57,7 @@ class PipelineBinding:
             "binding_id": self.binding_id,
             "pipeline": list(self.pipeline) if not isinstance(self.pipeline, str) else self.pipeline,
             "events": list(self.events),
+            "profile_name": self.profile_name,
         }
 
 
@@ -69,6 +70,11 @@ class CameraRuntimeState:
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     pipeline_binding_ids: Tuple[str, ...] = field(default_factory=tuple)
     error: Optional[str] = None
+    # ---- optional extensions used by auto-templates / auto-profile-fetch ----
+    # Kept with defaults so existing constructors ``CameraRuntimeState(identity)``
+    # continue to work unchanged.
+    profiles_snapshot: Optional["CameraProfileSnapshot"] = None
+    template_binding_ids: Tuple[str, ...] = field(default_factory=tuple)
 
     def touch(self) -> None:
         self.last_seen = datetime.now(timezone.utc)
@@ -164,3 +170,204 @@ def pipeline_list(value: Sequence[str] | str) -> Sequence[str] | str:
     if isinstance(value, str):
         return value.strip()
     return tuple(str(item) for item in value)
+
+
+# ---------------------------------------------------------------------------
+# Auto-templates and auto-profile-fetch (opt-in additions).
+#
+# The types below are strictly additive; nothing in the existing runtime uses
+# them unless the caller registers a :class:`PipelineTemplate` via the new
+# public API or enables :meth:`VideoEngine.enable_auto_profile_fetch`.
+# ---------------------------------------------------------------------------
+
+
+def _norm_mac_str(mac: Optional[str]) -> str:
+    normalized = _normalize_mac(mac)
+    return normalized or ""
+
+
+@dataclass(frozen=True)
+class CameraMatcher:
+    """Predicate describing which discovered cameras a template applies to.
+
+    Every populated field must hold for the matcher to fire (logical AND).
+    Unset fields (``None`` / empty) are ignored. Matching is pure and side-
+    effect free.
+
+    ``hostname`` / ``port`` / ``mac`` match a single identity.
+    ``mac_prefix`` matches any camera whose (normalized) MAC starts with the
+    given prefix (case-insensitive, separators collapsed to ``:``).
+    ``subnet`` matches any hostname/IP that lies inside the given CIDR (e.g.
+    ``"10.91.106.0/24"``); non-IP hostnames never match.
+    """
+
+    hostname: Optional[str] = None
+    port: Optional[int] = None
+    mac: Optional[str] = None
+    mac_prefix: Optional[str] = None
+    subnet: Optional[str] = None
+
+    @staticmethod
+    def _ip_in_subnet(hostname: str, subnet: str) -> bool:
+        # Local import so the ipaddress dependency is only paid when subnets
+        # are actually used.
+        import ipaddress  # pylint: disable=import-outside-toplevel
+
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            return False
+        try:
+            network = ipaddress.ip_network(subnet, strict=False)
+        except ValueError:
+            return False
+        return addr in network
+
+    def matches(self, identity: CameraIdentity) -> bool:
+        """Return True when *identity* satisfies every populated field."""
+        if self.hostname is not None and self.hostname != identity.hostname:
+            return False
+        if self.port is not None and int(self.port) != int(identity.port):
+            return False
+
+        cam_mac = _norm_mac_str(identity.mac)
+        if self.mac is not None:
+            if not cam_mac or _norm_mac_str(self.mac) != cam_mac:
+                return False
+        if self.mac_prefix is not None:
+            wanted = _norm_mac_str(self.mac_prefix)
+            if not wanted or not cam_mac.startswith(wanted):
+                return False
+        if self.subnet is not None and not self._ip_in_subnet(identity.hostname, self.subnet):
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class CameraProfileSnapshot:
+    """Cached ONVIF media profiles for one camera.
+
+    ``profiles`` uses ``Any`` typing to avoid importing the
+    :mod:`camera_profiles` package here (keeps the type layer lightweight).
+    """
+
+    identity: CameraIdentity
+    profiles: Tuple[Any, ...] = field(default_factory=tuple)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    mac_address: str = ""
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+@dataclass(frozen=True)
+class PipelineTemplate:
+    """Recipe used to auto-instantiate a :class:`PipelineBinding`.
+
+    A template is applied by the engine every time a discovered camera
+    satisfies :attr:`matcher`. The rendered pipeline supports the following
+    placeholders (all optional): ``{rtsp_url}``, ``{hostname}``, ``{port}``,
+    ``{mac}``, ``{profile_name}``.
+
+    :attr:`profile_selector` chooses which media profile to bind against:
+
+    - ``"first"`` (default) — first profile reported by the camera.
+    - ``"name=<value>"``    — profile whose ``name`` equals ``<value>``.
+    """
+
+    template_id: str
+    pipeline: Sequence[str] | str
+    matcher: CameraMatcher = field(default_factory=CameraMatcher)
+    profile_selector: str = "first"
+    events: Tuple[str, ...] = field(default_factory=tuple)
+    username: str = ""
+    password: str = ""
+    auto_start: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "template_id": self.template_id,
+            "pipeline": (
+                list(self.pipeline) if not isinstance(self.pipeline, str) else self.pipeline
+            ),
+            "matcher": {
+                "hostname": self.matcher.hostname,
+                "port": self.matcher.port,
+                "mac": self.matcher.mac,
+                "mac_prefix": self.matcher.mac_prefix,
+                "subnet": self.matcher.subnet,
+            },
+            "profile_selector": self.profile_selector,
+            "events": list(self.events),
+            "auto_start": self.auto_start,
+        }
+
+
+def as_camera_matcher(payload: Any) -> CameraMatcher:
+    """Build a :class:`CameraMatcher` from a dict payload."""
+
+    if isinstance(payload, CameraMatcher):
+        return payload
+    if payload is None:
+        return CameraMatcher()
+    if not isinstance(payload, dict):
+        raise TypeError("matcher payload must be a mapping")
+    port = payload.get("port")
+    return CameraMatcher(
+        hostname=payload.get("hostname"),
+        port=int(port) if port is not None else None,
+        mac=payload.get("mac"),
+        mac_prefix=payload.get("mac_prefix"),
+        subnet=payload.get("subnet"),
+    )
+
+
+def as_pipeline_template(payload: Any) -> PipelineTemplate:
+    """Build a :class:`PipelineTemplate` from a dict payload."""
+
+    if isinstance(payload, PipelineTemplate):
+        return payload
+    if not isinstance(payload, dict):
+        raise TypeError("template payload must be a mapping")
+
+    template_id = payload.get("template_id") or payload.get("id")
+    if not template_id:
+        raise ValueError("pipeline template requires 'template_id'")
+    pipeline = payload.get("pipeline")
+    if pipeline is None:
+        raise ValueError(f"pipeline template '{template_id}' requires 'pipeline'")
+
+    return PipelineTemplate(
+        template_id=str(template_id),
+        pipeline=pipeline_list(pipeline),
+        matcher=as_camera_matcher(payload.get("matcher")),
+        profile_selector=str(payload.get("profile_selector", "first")),
+        events=tuple(str(item) for item in (payload.get("events") or ())),
+        username=str(payload.get("username", "")),
+        password=str(payload.get("password", "")),
+        auto_start=bool(payload.get("auto_start", True)),
+    )
+
+
+def select_profile(
+    profiles: Sequence[Any],
+    selector: str,
+) -> Optional[Any]:
+    """Pick a profile from a list according to a selector string.
+
+    Supports ``"first"`` and ``"name=<value>"``. Unknown selectors fall back
+    to the first profile so the runtime stays forgiving of typos.
+    """
+
+    if not profiles:
+        return None
+    sel = (selector or "first").strip()
+    if sel.startswith("name="):
+        wanted = sel[len("name="):]
+        for profile in profiles:
+            if str(getattr(profile, "name", "")) == wanted:
+                return profile
+        return None
+    return profiles[0]

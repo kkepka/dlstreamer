@@ -104,7 +104,7 @@ SOAP call via `asyncio.to_thread`.
 - **Read**: `get_status`, `get_presets`, `get_configurations`, `get_nodes`.
 - **Movement**: `continuous_move`, `relative_move`, `absolute_move`, `stop`.
 - **Presets**: `set_preset`, `goto_preset`, `remove_preset`.
-- **Home**: `goto_home`, `set_home`.
+- **Home**: `home_supported`, `goto_home`, `set_home`.
 - **Lifecycle**: `close()` / context manager (`with PTZController(...)`).
 
 **Client-side auto-stop**: `continuous_move(timeout=...)` does *not* send the
@@ -187,6 +187,7 @@ The public API is defined in `api.py` and re-exported by `__init__.py`.
 | PTZController.stop | stop(pan_tilt: bool = True, zoom: bool = True) -> None | pan_tilt, zoom | None | Stops pan/tilt and/or zoom motion. |
 | PTZController.goto_preset | goto_preset(preset_token: str, speed: PTZVector \| None = None) -> None | preset_token, speed | None | Moves camera to a saved preset. |
 | PTZController.goto_home | goto_home(speed: PTZVector \| None = None) -> None | speed | None | Moves camera to home position. |
+| PTZController.home_supported | home_supported() -> bool | - | bool | True when the PTZ node advertises `HomeSupported`; check before `goto_home`/`set_home`. |
 
 ## Usage examples
 

@@ -386,9 +386,15 @@ def _run_control_screen(state: TestAppState, cap: PTZCapableProfile) -> None:
                 elif key == " ":
                     _do("stop", ctrl.stop)
                 elif key == "h":
-                    _do("goto_home", ctrl.goto_home)
+                    if ctrl.home_supported():
+                        _do("goto_home", ctrl.goto_home)
+                    else:
+                        print("  goto_home: not supported by this camera (HomeSupported=False)")
                 elif key == "H":
-                    _do("set_home", ctrl.set_home)
+                    if ctrl.home_supported():
+                        _do("set_home", ctrl.set_home)
+                    else:
+                        print("  set_home: not supported by this camera (HomeSupported=False)")
                 elif key == "i":
                     try:
                         status = ctrl.get_status()

@@ -14,12 +14,16 @@ from .engine import VideoEngine
 from .types import (
     CameraEventDefinition,
     CameraIdentity,
+    CameraMatcher,
+    CameraProfileSnapshot,
     CameraRuntimeState,
     EventRule,
     EventTrigger,
     PipelineAction,
     PipelineBinding,
+    PipelineTemplate,
     VideoEngineEvent,
+    as_pipeline_template,
 )
 from .dynamic import (
     CameraEventWorker,
@@ -113,8 +117,8 @@ def getDiscoveryTime() -> int:
     return _DEFAULT_ENGINE.getDiscoveryTime()
 
 
-def load_config(config_path: str | Path) -> None:
-    _DEFAULT_ENGINE.load_config(config_path)
+def load_config(config_path: str | Path, *, pipeline_library: dict[str, Any] | None = None) -> None:
+    _DEFAULT_ENGINE.load_config(config_path, pipeline_library=pipeline_library)
 
 
 def save_config() -> None:
@@ -191,6 +195,39 @@ def get_active_pipelines() -> list[dict[str, Any]]:
     return _DEFAULT_ENGINE.get_active_pipelines()
 
 
+# ---------------------------------------------------------------------------
+# Auto-templates and auto-profile-fetch (opt-in public API)
+# ---------------------------------------------------------------------------
+
+
+def enable_auto_profile_fetch(
+    enabled: bool = True,
+    *,
+    ttl_seconds: float = 300.0,
+) -> None:
+    """Toggle automatic ONVIF profile fetch on the shared engine."""
+    _DEFAULT_ENGINE.enable_auto_profile_fetch(enabled, ttl_seconds=ttl_seconds)
+
+
+def add_pipeline_template(template: PipelineTemplate | dict[str, Any]) -> PipelineTemplate:
+    """Register a pipeline template on the shared engine.
+
+    ``template`` may be a :class:`PipelineTemplate` instance or a plain
+    mapping (parsed via :func:`as_pipeline_template`).
+    """
+    if isinstance(template, dict):
+        template = as_pipeline_template(template)
+    return _DEFAULT_ENGINE.add_pipeline_template(template)
+
+
+def remove_pipeline_template(template_id: str) -> None:
+    _DEFAULT_ENGINE.remove_pipeline_template(template_id)
+
+
+def list_pipeline_templates() -> list[dict[str, Any]]:
+    return _DEFAULT_ENGINE.list_pipeline_templates()
+
+
 def create_dynamic_controller(
     engine: VideoEngine | None = None,
     *,
@@ -207,11 +244,14 @@ __all__ = [
     # ===== Model classes =====
     "CameraEventDefinition",
     "CameraIdentity",
+    "CameraMatcher",
+    "CameraProfileSnapshot",
     "CameraRuntimeState",
     "EventRule",
     "EventTrigger",
     "PipelineAction",
     "PipelineBinding",
+    "PipelineTemplate",
     "VideoEngine",
     "VideoEngineEvent",
     
@@ -250,6 +290,13 @@ __all__ = [
     # ===== State query =====
     "get_active_cameras",
     "get_active_pipelines",
+
+    # ===== Auto-templates / auto-profile-fetch =====
+    "enable_auto_profile_fetch",
+    "add_pipeline_template",
+    "remove_pipeline_template",
+    "list_pipeline_templates",
+    "as_pipeline_template",
 
     # ===== Dynamic (event-driven) pipeline control =====
     "DynamicPipelineController",

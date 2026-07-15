@@ -27,7 +27,8 @@ from dlstreamer.onvif.video_engine import (
 
 
 DEFAULT_CONFIG_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_pipelines.json")
-DEFAULT_RULES_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_rules.json")
+DEFAULT_RULES_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_event_mapping.json")
+DEFAULT_BINDINGS_PATH = Path("/home/labrat/intel/onvif-vippet-library/dlstreamer/python/dlstreamer/onvif/video_engine_test_app/video_engine_static_mapping.json")
 REQUIRED_ENV_VARS = [
     ("ONVIF_USER", "required", "ONVIF authentication username"),
     ("ONVIF_PASSWORD", "required", "ONVIF authentication password"),
@@ -53,6 +54,8 @@ class TestAppState:
         self.engine: VideoEngine = create_video_engine(verbose=True)
         self.controller: DynamicPipelineController = create_dynamic_controller(self.engine, verbose=True)
         self.rules_path = DEFAULT_RULES_PATH
+        self.bindings_path = DEFAULT_BINDINGS_PATH
+        self.bindings_loaded = False
         self.pipeline_library: dict[str, Any] = {}
         if self.config_path.exists():
             self.pipeline_library = self.controller.load_pipeline_library(self.config_path)
@@ -124,6 +127,24 @@ def _rows_for_pairs(pairs: list[dict[str, Any]]) -> list[list[str]]:
                 str(item.get("binding_id", "-")),
                 f"{camera.get('hostname', '-')}:{camera.get('port', '-')}",
                 str(camera.get("mac", "-")),
+                json.dumps(item.get("pipeline", ""))[:80],
+                ", ".join(item.get("events", [])) or "-",
+            ]
+        )
+    return rows
+
+
+def _rows_for_pairs_with_profile(pairs: list[dict[str, Any]]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, item in enumerate(pairs, 1):
+        camera = item.get("camera", {})
+        rows.append(
+            [
+                str(index),
+                str(item.get("binding_id", "-")),
+                f"{camera.get('hostname', '-')}:{camera.get('port', '-')}",
+                str(camera.get("mac", "-")),
+                str(item.get("profile_name") or "-"),
                 json.dumps(item.get("pipeline", ""))[:80],
                 ", ".join(item.get("events", [])) or "-",
             ]
@@ -271,16 +292,20 @@ def _camera_label(camera: dict[str, Any]) -> str:
 
 
 def _rows_for_json_camera(camera: dict[str, Any], entry: dict[str, Any], index: int) -> list[list[str]]:
-    pipeline_value = entry.get("pipeline", [])
-    if isinstance(pipeline_value, list):
-        pipeline_value = " | ".join(str(item) for item in pipeline_value)
+    pipeline_value = entry.get("pipeline")
+    if pipeline_value is None:
+        # Reference-based binding: show the pipeline id it points at.
+        ref = entry.get("pipeline_ref")
+        pipeline_cell = f"pipeline_ref: {ref}" if ref else "-"
+    elif isinstance(pipeline_value, list):
+        pipeline_cell = " | ".join(str(item) for item in pipeline_value)
     else:
-        pipeline_value = str(pipeline_value)
+        pipeline_cell = str(pipeline_value)
 
     return [
         [str(index), "camera", _camera_label(camera)],
         [str(index), "binding_id", str(entry.get("binding_id", "-"))],
-        [str(index), "pipeline", pipeline_value[:120]],
+        [str(index), "pipeline", pipeline_cell[:120]],
         [str(index), "events", ", ".join(str(item) for item in entry.get("events", [])) or "-"],
     ]
 
@@ -395,7 +420,7 @@ def build_dump_report(state: TestAppState) -> str:
     lines.append(build_environment_report())
 
     lines.append("")
-    lines.append(build_json_report(state.config_path))
+    lines.append(build_json_report(state.bindings_path))
 
     return "\n".join(lines)
 
@@ -447,6 +472,72 @@ def _action_show_pipeline_library(state: TestAppState) -> None:
         ["#", "pipeline_id", "command"],
         _rows_for_pipeline_library(state.pipeline_library),
     ))
+
+
+def _action_load_bindings(state: TestAppState) -> None:
+    """Load static camera-pipeline bindings from a JSON file (enables them).
+
+    Uses :meth:`VideoEngine.load_config`. Each entry carries a ``camera``
+    identity and references a pipeline by id (``pipeline_ref``) resolved
+    against the loaded pipeline library — the single source of pipeline
+    definitions (``video_engine_pipelines.json``). An inline ``pipeline`` is
+    still accepted for standalone configs. Once loaded and discovery is
+    started (option "Start discovery..."), matching cameras auto-launch their
+    bound pipelines.
+    """
+    path = _prompt("Static bindings file", str(state.bindings_path))
+    bindings_path = Path(path)
+    if not bindings_path.exists():
+        state.log_event("ERROR", "load_bindings", "local", {"bindings_path": str(bindings_path)}, message="bindings file not found")
+        print(f"File not found: {bindings_path}")
+        return
+    if not state.pipeline_library:
+        print("Note: no pipeline library loaded — 'pipeline_ref' entries will fail to resolve.")
+        print("      Load it first via 'Load pipeline json file'.")
+    try:
+        state.engine.load_config(bindings_path, pipeline_library=state.pipeline_library)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        state.log_event("ERROR", "load_bindings", "local", {"error": str(exc)}, message="failed to load bindings")
+        print(f"Failed to load static bindings: {exc}")
+        return
+
+    state.bindings_path = bindings_path
+    state.bindings_loaded = True
+    pairs = state.engine.list_camera_pipeline_pairs()
+    state.log_event("INFO", "load_bindings", "local", {"bindings_path": str(bindings_path), "count": len(pairs)}, message="static bindings loaded")
+    print(f"Static camera-pipeline bindings loaded ({len(pairs)} binding(s)) from {bindings_path}.")
+    print()
+    print(_render_table(
+        "Loaded static camera-pipeline bindings",
+        ["#", "binding_id", "camera", "mac", "pipeline", "events"],
+        _rows_for_pairs(pairs),
+    ))
+
+
+def _action_show_bindings(state: TestAppState) -> None:
+    """Display the currently loaded static camera-pipeline bindings as a table."""
+    pairs = state.engine.list_camera_pipeline_pairs()
+    state.log_event("INFO", "show_bindings", "local", {"count": len(pairs)}, message="static bindings inspected")
+    if not state.bindings_loaded and not pairs:
+        print("No static bindings loaded. Use 'Load static camera-pipeline bindings' first.")
+        return
+    print(_render_table(
+        f"Static camera-pipeline mapping (source: {state.bindings_path})",
+        ["#", "binding_id", "camera", "mac", "profile", "pipeline", "events"],
+        _rows_for_pairs_with_profile(pairs),
+    ))
+
+
+def _action_clear_bindings(state: TestAppState) -> None:
+    """Disable static bindings: stop any running pipelines and forget them."""
+    pairs = state.engine.list_camera_pipeline_pairs()
+    for pair in pairs:
+        binding_id = pair.get("binding_id")
+        if binding_id:
+            state.engine.remove_pipeline(binding_id)
+    state.bindings_loaded = False
+    state.log_event("INFO", "clear_bindings", "local", {"count": len(pairs)}, message="static bindings cleared")
+    print(f"Static camera-pipeline bindings disabled ({len(pairs)} removed).")
 
 
 def _action_add_pipeline(state: TestAppState) -> None:
@@ -539,10 +630,6 @@ def _action_check_environment(state: TestAppState) -> None:
     state.log_event("INFO", "check_environment", "local", {}, message="environment inspected")
     print(build_environment_report())
 
-
-def _action_show_json(state: TestAppState) -> None:
-    state.log_event("INFO", "show_json", "local", {"config_path": str(state.config_path)}, message="json configuration inspected")
-    print(build_json_report(state.config_path))
 
 
 def _action_load_rules(state: TestAppState) -> None:
@@ -744,24 +831,26 @@ def run(argv: Optional[list[str]] = None) -> None:
             print()
             print("video_engine test app")
             print("1) Configure ONVIF credentials")
-            print("2) Load pipeline json file")
+            print("2) Load pipeline library file (JSON)(file with defined pipelines)")
             print("3) Show loaded pipeline library")
-            print("4) Load dynamic event->action rules")
-            print("5) Show dynamic event->action rules")
-            print("6) Add camera-pipeline mapping")
-            print("7) Show JSON camera-pipeline mapping")
-            print("8) Add ONVIF event definition")
-            print("9) Set discovery interval and timeout")
-            print("10) Start discovery and pipeline orchestration")
-            print("11) Stop discovery and pipelines")
-            print("12) Start dynamic pipeline control (event-driven)")
-            print("13) Stop dynamic pipeline control")
-            print("14) Dump current state")
-            print("15) Check environment variables")
-            print("16) Clear logs")
-            print("17) List camera profiles")
-            print("18) Preview stream")
-            print("19) Quit")
+            print("4) Load static camera-pipeline mapping (JSON)")
+            print("5) Show static camera-pipeline mapping")
+            print("6) Clear static camera-pipeline mapping")
+            print("7) Load dynamic event->action rules")
+            print("8) Show dynamic event->action rules")
+            print("9) Add camera-pipeline mapping")
+            print("10) Add ONVIF event definition")
+            print("11) Set discovery interval and timeout")
+            print("12) Start discovery and pipeline orchestration")
+            print("13) Stop discovery and pipelines")
+            print("14) Start dynamic pipeline control (event-driven)")
+            print("15) Stop dynamic pipeline control")
+            print("16) Dump current state")
+            print("17) Check environment variables")
+            print("18) Clear logs")
+            print("19) List camera profiles")
+            print("20) Preview stream")
+            print("21) Quit")
 
             choice = _prompt("Select option")
             if choice == "__cancel__":
@@ -774,36 +863,40 @@ def run(argv: Optional[list[str]] = None) -> None:
             elif choice == "3":
                 _action_show_pipeline_library(state)
             elif choice == "4":
-                _action_load_rules(state)
+                _action_load_bindings(state)
             elif choice == "5":
-                _action_show_rules(state)
+                _action_show_bindings(state)
             elif choice == "6":
-                _action_add_pipeline(state)
+                _action_clear_bindings(state)
             elif choice == "7":
-                _action_show_json(state)
+                _action_load_rules(state)
             elif choice == "8":
-                _action_add_event(state)
+                _action_show_rules(state)
             elif choice == "9":
-                _action_set_timers(state)
+                _action_add_pipeline(state)
             elif choice == "10":
-                _action_start(state)
+                _action_add_event(state)
             elif choice == "11":
-                _action_stop(state)
+                _action_set_timers(state)
             elif choice == "12":
-                _action_start_dynamic(state)
+                _action_start(state)
             elif choice == "13":
-                _action_stop_dynamic(state)
+                _action_stop(state)
             elif choice == "14":
-                _action_dump(state)
+                _action_start_dynamic(state)
             elif choice == "15":
-                _action_check_environment(state)
+                _action_stop_dynamic(state)
             elif choice == "16":
-                _action_clear_logs(state)
+                _action_dump(state)
             elif choice == "17":
-                _action_list_camera_profiles(state)
+                _action_check_environment(state)
             elif choice == "18":
-                _action_preview_stream(state)
+                _action_clear_logs(state)
             elif choice == "19":
+                _action_list_camera_profiles(state)
+            elif choice == "20":
+                _action_preview_stream(state)
+            elif choice == "21":
                 break
             else:
                 print("Unknown option.")

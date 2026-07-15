@@ -721,9 +721,9 @@ State:       cached cameras={n_cams}  profile results={n_results}  players={n_pl
   7) read_camera_profiles_async (async, all cached cameras)
   8) Full flow: async discovery → async profile read (streaming)
   9) Show current state
- 10) Play RTSP stream from a cached profile (non-blocking)
- 11) Stop all background RTSP players
- 12) Show ALL profile details (full field dump)
+ 10) Show ALL profile details (full field dump)
+ 11) Play RTSP stream from a cached profile (non-blocking)
+ 12) Stop all background RTSP players
   0) Exit
 
 > """
@@ -778,11 +778,11 @@ def run() -> None:
             elif choice == "9":
                 action_show_state(state)
             elif choice == "10":
-                action_play_rtsp(state)
-            elif choice == "11":
-                action_stop_players(state)
-            elif choice == "12":
                 action_show_all_details(state)
+            elif choice == "11":
+                action_play_rtsp(state)
+            elif choice == "12":
+                action_stop_players(state)
             else:
                 print(f"  Unknown choice: {choice!r}")
         except KeyboardInterrupt:

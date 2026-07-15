@@ -157,6 +157,7 @@ Source README: ptz/README.md
 | PTZController.stop | stop(pan_tilt: bool = True, zoom: bool = True) -> None | pan_tilt, zoom | None | Stops pan/tilt and/or zoom motion. |
 | PTZController.goto_preset | goto_preset(preset_token: str, speed: PTZVector \| None = None) -> None | preset_token, speed | None | Moves camera to a saved preset. |
 | PTZController.goto_home | goto_home(speed: PTZVector \| None = None) -> None | speed | None | Moves camera to home position. |
+| PTZController.home_supported | home_supported() -> bool | - | bool | True when the PTZ node advertises `HomeSupported`; check before `goto_home`/`set_home` to avoid a SOAP fault on cameras without home support. |
 
 ### Data contracts
 
@@ -305,9 +306,12 @@ Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/types.py`
 |---|---|
 | CameraIdentity | Normalized camera key (hostname, port, optional MAC) used for matching and state tracking. |
 | PipelineBinding | Configured DL Streamer pipeline associated with a `CameraIdentity` (binding_id, pipeline command, optional events, optional profile_name, optional username/password used for `{rtsp_url}` resolution). |
-| CameraRuntimeState | Live state for a discovered camera (status, last_seen, active pipeline binding IDs, error). |
+| CameraRuntimeState | Live state for a discovered camera (status, last_seen, active pipeline binding IDs, error, cached profiles snapshot, template binding IDs). |
 | VideoEngineEvent | Callback payload emitted by the engine (kind, camera, details, timestamp). |
 | CameraEventDefinition | ONVIF event definition attached to a camera (name, camera, topic_filter, renew_every, metadata). |
+| CameraMatcher | Opt-in template predicate matching a camera by `hostname`/`port`/`mac`/`mac_prefix`/`subnet` (CIDR). |
+| PipelineTemplate | Opt-in recipe (matcher + placeholder pipeline + `profile_selector`) auto-instantiated into a `PipelineBinding` on every matching camera. |
+| CameraProfileSnapshot | Cached ONVIF media profiles for one camera (profiles, fetched_at, mac_address, error, `ok`). |
 | VideoEngine | Coordinator class; call `create_video_engine()` or `get_video_engine()` to obtain an instance. |
 
 ### Public factory and lifecycle functions
@@ -335,7 +339,7 @@ Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/types.py`
 | getTimeout | `getTimeout() -> int` | Returns the current camera-lost timeout in seconds. |
 | setDiscoveryTime | `setDiscoveryTime(sec: int) -> None` | Sets how often ONVIF discovery re-scans the network, in seconds. Minimum 1. |
 | getDiscoveryTime | `getDiscoveryTime() -> int` | Returns the current discovery re-scan interval. |
-| load_config | `load_config(config_path: str \| Path) -> None` | Loads or reloads JSON pipeline bindings on the default engine. |
+| load_config | `load_config(config_path: str \| Path, *, pipeline_library: dict[str, Any] \| None = None) -> None` | Loads or reloads JSON camera bindings on the default engine. Binding entries reference a pipeline by id (`pipeline_ref`) resolved against `pipeline_library`, or carry an inline `pipeline`. |
 | save_config | `save_config() -> None` | Persists the current in-memory bindings back to the JSON configuration file. |
 
 ### Public camera pipeline management
@@ -345,6 +349,16 @@ Source: `video_engine/api.py`, `video_engine/engine.py`, `video_engine/types.py`
 | list_camera_pipeline_pairs | `list_camera_pipeline_pairs() -> list[dict]` | Returns all configured (camera, pipeline) bindings as dicts. |
 | get_pipeline_for_camera | `get_pipeline_for_camera(hostname: str, port: int, mac: str \| None = None) -> list[dict]` | Returns all bindings matching the given camera identity. |
 | set_camera_pipeline | `set_camera_pipeline(hostname: str, port: int, pipeline: Sequence[str] \| str, *, mac: str \| None = None, binding_id: str \| None = None, events: Iterable[str] \| None = None, persist: bool = False) -> PipelineBinding` | Registers a new pipeline binding for a camera; when `persist=True` writes the configuration back to disk. |
+
+### Public auto-templates and auto-profile-fetch (opt-in)
+
+| Function | Signature | Description |
+|---|---|---|
+| enable_auto_profile_fetch | `enable_auto_profile_fetch(enabled: bool = True, *, ttl_seconds: float = 300.0) -> None` | Toggles automatic ONVIF media-profile fetch (with TTL cache) on discovery for the default engine. |
+| add_pipeline_template | `add_pipeline_template(template: PipelineTemplate \| dict) -> PipelineTemplate` | Registers a template that auto-instantiates a binding for every matching discovered camera. |
+| remove_pipeline_template | `remove_pipeline_template(template_id: str) -> None` | Unregisters a template by id (does not stop bindings it already produced). |
+| list_pipeline_templates | `list_pipeline_templates() -> list[dict]` | Returns the currently registered templates as dicts. |
+| as_pipeline_template | `as_pipeline_template(payload: Any) -> PipelineTemplate` | Builds a `PipelineTemplate` from a dict payload. |
 
 ### Public camera events
 
@@ -382,25 +396,43 @@ These behave identically to the originals; see the [camera_profiles](#camera_pro
 The `video_engine` module works with two JSON files that separate **pipeline
 definitions** from the **cameras/rules** that use them.
 
-**1. Engine binding config** (`VideoEngine.load_config`) — camera bindings with an
-inline pipeline (a mapping or a plain list of entries). Each entry may carry
-`username`/`password` used to resolve the `{rtsp_url}` placeholder:
+**1. Engine binding config** (`VideoEngine.load_config`) — camera bindings that
+reference a pipeline **by id** (`pipeline_ref`) resolved against the pipeline
+library, keeping a single source of pipeline definitions (an inline `pipeline` is
+still accepted for standalone configs). Each entry may carry `username`/`password`
+used to resolve the `{rtsp_url}` placeholder:
 
 ```json
 {
   "pipelines": [
     {
-      "binding_id": "lab_cam1_main",
+      "binding_id": "cam1_main",
       "camera": {"hostname": "10.0.0.15", "port": 80, "mac": null},
       "profile_name": "MainStream",
       "events": [],
       "username": "admin",
       "password": "secret",
-      "pipeline": [
-        "gst-launch-1.0", "-v", "rtspsrc", "location={rtsp_url}", "!",
-        "rtph264depay", "!", "h264parse", "!", "avdec_h264", "!",
-        "videoconvert", "!", "gvawatermark", "!", "ximagesink"
-      ]
+      "pipeline_ref": "lab_cam1_main"
+    }
+  ]
+}
+```
+
+The same file may also carry an optional `templates` list (opt-in auto-templates).
+Each template pairs a `matcher` (`hostname`/`port`/`mac`/`mac_prefix`/`subnet`)
+with a placeholder pipeline; matching cameras discovered later auto-start a
+generated binding. Placeholders: `{rtsp_url}`, `{hostname}`, `{port}`, `{mac}`,
+`{profile_name}`. `profile_selector` is `"first"` (default) or `"name=<value>"`:
+
+```json
+{
+  "templates": [
+    {
+      "template_id": "any-h264-main",
+      "matcher": { "subnet": "10.91.106.0/24" },
+      "profile_selector": "name=MainStream",
+      "pipeline": ["gst-launch-1.0", "rtspsrc", "location={rtsp_url}", "!", "..."],
+      "username": "admin", "password": "r00tme", "auto_start": true
     }
   ]
 }
@@ -424,7 +456,7 @@ the rules with `load_rules()`:
 ```
 
 ```json
-// video_engine_rules.json — cameras + pipeline_ref
+// video_engine_event_mapping.json — cameras + pipeline_ref
 { "rules": [
     {
       "name": "run-ball-test-on-motion",
@@ -499,22 +531,37 @@ python -m dlstreamer.onvif.video_engine_test_app --config /path/to/video_engine_
 
 ### Configuration files
 
-The application uses two files with separated responsibilities:
+The application uses three JSON files with separated responsibilities:
 
+- `video_engine_static_mapping.json` — **static camera-pipeline bindings** (`pipelines`
+  as a **list** of entries, each carrying a `camera` identity and a `pipeline_ref`
+  that points at a pipeline id in `video_engine_pipelines.json` — the single
+  source of pipeline definitions). Loaded via menu option **4) Load static
+  camera-pipeline bindings (JSON)** (`VideoEngine.load_config`, resolving refs
+  against the loaded pipeline library); view with **5) Show static camera-pipeline
+  bindings**, unload with **6) Clear static camera-pipeline bindings**.
 - `video_engine_pipelines.json` — the **pipeline library** (`id → definition`),
-  with no camera information. Loaded via menu option **1) Load pipeline library**.
-- `video_engine_rules.json` — the **rules**: cameras + trigger + a `pipeline_ref`
-  pointing at a pipeline in the library. Loaded via **13) Load dynamic rules**,
-  then **14) Start dynamic pipeline control** starts listening for events.
+  with no camera information. Loaded via menu option **2) Load pipeline json
+  file**; view with **3) Show loaded pipeline library**.
+- `video_engine_event_mapping.json` — the **rules**: cameras + trigger + a `pipeline_ref`
+  pointing at a pipeline in the library. Loaded via **7) Load dynamic
+  event->action rules**, then **14) Start dynamic pipeline control** starts
+  listening for events.
 
-This way a pipeline is defined only once, and the rules merely reference it.
+Static bindings and the pipeline library both use a top-level `pipelines` key,
+but the static file is a **list** of bindings while the library is a **mapping**
+`id → pipeline` — they are handled by different loaders.
+
+To launch pipelines for loaded static bindings, start discovery with **12) Start
+discovery and pipeline orchestration** and stop it with **13) Stop discovery and
+pipelines**.
 
 ### Credentials (username / password)
 
-- **Menu option 17) Configure ONVIF credentials** — prompts interactively for the
+- **Menu option 1) Configure ONVIF credentials** — prompts interactively for the
   username and password (`getpass`); they become the defaults for the engine and
   controller (fallback used when a binding/rule has none of its own).
 - Alternatively: the `username`/`password` fields in a rule (or binding), or the
   `ONVIF_USER` / `ONVIF_PASSWORD` environment variables (used, among others, by
-  options 11 — profiles and 12 — preview). The password is not serialized by
-  `to_dict()`.
+  options **19) List camera profiles** and **20) Preview stream**). The password
+  is not serialized by `to_dict()`.

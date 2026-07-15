@@ -1,8 +1,8 @@
 # `video_engine` library — overview
 
 The `video_engine` library orchestrates the full lifecycle: **ONVIF camera
-discovery → matching against configuration → launching DL Streamer pipelines →
-dynamic, event-driven changes**.
+discovery → matching against configuration (static bindings or dynamic
+templates) → launching DL Streamer pipelines → dynamic, event-driven changes**.
 
 ## Layered architecture
 
@@ -16,7 +16,7 @@ flowchart TD
             DYNAMIC["<b>dynamic.py</b><br/>DynamicPipelineController"]
         end
         subgraph Data["Data layer"]
-            MODEL["<b>model.py</b><br/>dataclasses"]
+            MODEL["<b>types.py</b><br/>dataclasses"]
         end
     end
     subgraph External["External (ONVIF dependencies)"]
@@ -65,7 +65,7 @@ It follows the repository convention (public API in `api.py`, re-exported via
 
 ---
 
-## 2. `model.py` — data models (pure dataclasses)
+## 2. `types.py` — data models (pure dataclasses)
 
 All objects are `@dataclass`, most of them `frozen=True` (immutable). They carry
 no business logic — only data and light normalization.
@@ -74,15 +74,20 @@ no business logic — only data and light normalization.
 |-------|------|
 | `CameraIdentity` | Normalized camera key (`hostname:port:MAC`). MAC normalized to uppercase with `:` |
 | `PipelineBinding` | Association of a pipeline with a camera (+ `binding_id`, events, profile, optional `username`/`password` for RTSP-URL resolution) |
-| `CameraRuntimeState` | Live camera state (`discovered`/`matched`, `last_seen`, assigned bindings) |
+| `CameraRuntimeState` | Live camera state (`discovered`/`matched`, `last_seen`, assigned bindings, cached `profiles_snapshot`, `template_binding_ids`) |
 | `VideoEngineEvent` | Callback payload emitted by the engine |
 | `CameraEventDefinition` | ONVIF event definition attached to a camera |
 | `PipelineAction` | Enum: `ADD`, `MODIFY`, `REMOVE`, `RESTART` |
 | `EventTrigger` | Notification-matching condition (logical AND of fields) |
 | `EventRule` | Binds an `EventTrigger` → `PipelineAction` on a specific binding |
+| `CameraMatcher` | Opt-in template predicate: matches a camera by `hostname`/`port`/`mac`/`mac_prefix`/`subnet` (CIDR) |
+| `PipelineTemplate` | Opt-in recipe (`matcher` + placeholder pipeline + `profile_selector`) auto-instantiated into a `PipelineBinding` on every matching camera |
+| `CameraProfileSnapshot` | Cached ONVIF media profiles for one camera (`profiles`, `fetched_at`, `error`) |
 
-Helper functions: `as_camera_identity()` (builds an identity from a dict/object)
-and `pipeline_list()` (normalizes a pipeline given as a string/list).
+Helper functions: `as_camera_identity()` (builds an identity from a dict/object),
+`pipeline_list()` (normalizes a pipeline given as a string/list),
+`as_camera_matcher()` / `as_pipeline_template()` (build matcher/template from a
+dict), and `select_profile()` (pick a profile by `"first"` or `"name=<value>"`).
 
 ```mermaid
 classDiagram
@@ -140,6 +145,7 @@ API groups:
 - **Discovery**: `discovery_start/stop`
 - **Configuration**: `setTimeout/getTimeout`, `setDiscoveryTime/getDiscoveryTime`, `load_config`, `save_config`
 - **Pipeline management**: `list_camera_pipeline_pairs`, `get_pipeline_for_camera`, `set_camera_pipeline`
+- **Auto-templates / auto-profile-fetch** (opt-in): `enable_auto_profile_fetch`, `add_pipeline_template`, `remove_pipeline_template`, `list_pipeline_templates`, `as_pipeline_template`
 - **Events**: `set_camera_event`, `list_camera_events`
 - **Callbacks**: `register_callback`, `unregister_callback`
 - **State**: `get_active_cameras`, `get_active_pipelines`
@@ -232,6 +238,71 @@ Pipeline mutation methods (also used by the dynamic layer): `add_pipeline`
 (idempotent), `remove_pipeline`, `replace_pipeline` (stop→swap→start), and
 `restart_pipeline`.
 
+### Static camera-pipeline bindings (JSON)
+
+`VideoEngine.load_config(path, pipeline_library=...)` loads **static** bindings
+from a JSON file whose `pipelines` key is a **list**, each entry carrying a
+`camera` identity. To keep a **single source of pipeline definitions**, a binding
+references a pipeline by id via `pipeline_ref`, resolved against the pipeline
+library (`video_engine_pipelines.json`). An inline `pipeline` is still accepted
+for standalone configs. On discovery, a camera matching `hostname`/`port` (and
+`mac` when both sides have one) auto-starts its bound pipeline.
+
+```json
+{
+  "pipelines": [
+    {
+      "binding_id": "cam1_main",
+      "camera": { "hostname": "10.91.106.65", "port": 2020, "mac": "AA:BB:CC:DD:EE:FF" },
+      "profile_name": "MainStream",
+      "pipeline_ref": "lab_cam1_main",
+      "events": [], "username": "", "password": ""
+    }
+  ]
+}
+```
+
+> Note the key collision: the **static bindings** file uses `pipelines` as a
+> **list**, while the dynamic **pipeline library** (section 5) uses `pipelines`
+> as a **mapping** `id → pipeline`. They are parsed by different loaders, but the
+> bindings resolve their `pipeline_ref` against that same library — the single
+> source of pipeline definitions.
+
+### Auto-templates and auto-profile-fetch (opt-in)
+
+Templates auto-instantiate bindings for cameras not known ahead of time. A
+`PipelineTemplate` pairs a `CameraMatcher` (`hostname`/`port`/`mac`/`mac_prefix`/
+`subnet`) with a placeholder pipeline. On a match, the engine renders a
+`PipelineBinding` with a deterministic `binding_id` (`tpl:<id>:<camera>:<profile>`)
+and starts it; when the camera goes stale the template binding is stopped and
+removed.
+
+- Register in code: `add_pipeline_template(...)` / `remove_pipeline_template(id)` /
+  `list_pipeline_templates()`.
+- Or from the same config file via an optional `templates` list (parsed by
+  `load_config`).
+- Placeholders: `{rtsp_url}`, `{hostname}`, `{port}`, `{mac}`, `{profile_name}`.
+- Profiles are fetched (and cached with a TTL) only when auto-profile-fetch is on;
+  templates whose pipeline needs `{rtsp_url}`/`{profile_name}` enable it
+  implicitly, otherwise call `enable_auto_profile_fetch(True, ttl_seconds=...)`.
+  Identity-only templates never touch the network.
+- `profile_selector` picks the media profile: `"first"` (default) or
+  `"name=<value>"`.
+
+```json
+{
+  "templates": [
+    {
+      "template_id": "any-h264-main",
+      "matcher": { "subnet": "10.91.106.0/24" },
+      "profile_selector": "name=MainStream",
+      "pipeline": ["gst-launch-1.0", "rtspsrc", "location={rtsp_url}", "!", "..."],
+      "username": "admin", "password": "r00tme", "auto_start": true
+    }
+  ]
+}
+```
+
 ---
 
 ## 5. `dynamic.py` — event-driven dynamic control
@@ -268,7 +339,7 @@ pipeline is defined once and referenced by id:
   } }
   ```
 
-- **Rules** (`video_engine_rules.json`) — cameras + triggers + a `pipeline_ref`
+- **Rules** (`video_engine_event_mapping.json`) — cameras + triggers + a `pipeline_ref`
   pointing at a pipeline in the library (an inline `pipeline` is still accepted).
   Loaded with `DynamicPipelineController.load_rules(path)` after the library.
 
@@ -360,5 +431,5 @@ flowchart LR
 
 **Key idea:** `VideoEngine` is the execution layer (processes, threads, state),
 while `DynamicPipelineController` is a rule layer on top of it. Both share the
-models from `model.py`, and `api.py` ties everything together into a simple,
+models from `types.py`, and `api.py` ties everything together into a simple,
 functional public interface.

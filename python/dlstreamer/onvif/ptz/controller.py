@@ -335,6 +335,21 @@ class PTZController:
 
     # ---- home position ----
 
+    def home_supported(self) -> bool:
+        """Return True when the camera advertises Home Position support.
+
+        Reads the PTZ node capabilities (``GetNodes``) and checks the
+        ``HomeSupported`` flag. :meth:`goto_home` / :meth:`set_home` are
+        optional ONVIF operations and only valid when this is true; calling
+        them on a camera that reports ``HomeSupported=False`` raises a SOAP
+        fault.
+        """
+        try:
+            nodes = self.get_nodes()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        return any(bool(getattr(node, "HomeSupported", False)) for node in nodes)
+
     def goto_home(self, speed: Optional[PTZVector] = None) -> None:
         """Move the camera to its home position."""
         request: dict = {"ProfileToken": self.profile_token}
