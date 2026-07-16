@@ -19,12 +19,18 @@ Data model:
                              data, timestamp, PropertyOperation)
     EventFilter            — topic expression filter for subscribe()
     EventCapableCamera     — camera descriptor exposing an Events service
+    SupportedEventTopic    — advertised event type + its Source/Data schema
 
 Capability discovery (built on :mod:`~dlstreamer.onvif.camera_profiles`
 and :mod:`~dlstreamer.onvif.discovery`):
     is_event_capable()
     find_event_capable_cameras()         — sync generator
     find_event_capable_cameras_async()   — async generator
+
+Supported event introspection:
+    get_supported_event_topics()         — list the event types a camera
+                                           advertises via GetEventProperties,
+                                           with their Source/Data field schema
 
 Simple event reading:
     pull_events_once()                   — subscribe, pull one batch, close
@@ -45,6 +51,7 @@ from .types import (
     EventCapableCamera,
     EventFilter,
     EventNotification,
+    SupportedEventTopic,
 )
 from .capabilities import (
     find_event_capable_cameras,
@@ -52,6 +59,30 @@ from .capabilities import (
     is_event_capable,
 )
 from .engine import EventCallback, OnvifEventEngine
+
+
+def get_supported_event_topics(
+    hostname: str,
+    port: int,
+    username: str = "",
+    password: str = "",
+    verbose: bool = False,
+) -> list[SupportedEventTopic]:
+    """List the event types a camera advertises via ``GetEventProperties``.
+
+    Opens a short-lived engine, reads the camera's ONVIF ``TopicSet`` and
+    returns a :class:`SupportedEventTopic` per event type. Each carries the
+    topic path (e.g. ``"tns1:RuleEngine/CellMotionDetector/Motion"``) plus its
+    ``MessageDescription`` schema — the Source/Data field names and types the
+    notification will contain (e.g. ``data={"IsMotion": "xsd:boolean"}``). No
+    subscription is created. Use ``t.topic`` as an :class:`EventFilter`
+    expression. Returns an empty list when the camera exposes no topics.
+    """
+    engine = OnvifEventEngine(hostname, port, username, password, verbose)
+    try:
+        return engine.get_supported_event_topics()
+    finally:
+        engine.close()
 
 
 def pull_events_once(
@@ -169,10 +200,13 @@ __all__ = [
     "EventCapableCamera",
     "EventFilter",
     "EventNotification",
+    "SupportedEventTopic",
     # capability discovery
     "is_event_capable",
     "find_event_capable_cameras",
     "find_event_capable_cameras_async",
+    # supported event introspection
+    "get_supported_event_topics",
     # simple event reading
     "pull_events_once",
     "stream_events",

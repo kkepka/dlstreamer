@@ -13,8 +13,8 @@ Manages the full subscription lifecycle:
 - :meth:`renew`            — extend the ``TerminationTime``
 - :meth:`unsubscribe`      — close the subscription
 - :meth:`stream`           — async generator that keeps pulling
-- :meth:`get_event_properties` / :meth:`get_service_capabilities` —
-  read-only introspection helpers
+- :meth:`get_event_properties` / :meth:`get_service_capabilities` /
+  :meth:`get_supported_event_topics` — read-only introspection helpers
 
 Every blocking method has an ``*_async`` variant that offloads to a
 worker thread. The engine is safe to use from a single asyncio event
@@ -38,7 +38,7 @@ from typing import (
 from onvif import ONVIFCamera  # pylint: disable=import-error
 from onvif.client import ONVIFService  # pylint: disable=import-error
 
-from .types import EventCapableCamera, EventFilter, EventNotification
+from .types import EventCapableCamera, EventFilter, EventNotification, SupportedEventTopic
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +142,118 @@ def _parse_notification(msg: Any) -> EventNotification:
         data=_extract_simple_items(getattr(inner, "Data", None)),
         raw=msg,
     )
+
+
+# ---------------------------------------------------------------------------
+# GetEventProperties TopicSet parsing
+# ---------------------------------------------------------------------------
+
+# Marks a node in the WS-Topics tree as a concrete (subscribable) topic.
+_WSTOP_TOPIC_ATTR = "{http://docs.oasis-open.org/wsn/t-1}topic"
+
+# ``MessageDescription`` (and its Source/Data blocks) live in the ONVIF schema
+# namespace; they describe the payload each topic emits.
+_MESSAGE_DESCRIPTION = f"{{{_TT_NS['tt']}}}MessageDescription"
+
+
+def _local_name(tag: Any) -> str:
+    """Return the local part of an lxml tag, or ``""`` for comments/PIs."""
+    return tag.split("}")[-1] if isinstance(tag, str) else ""
+
+
+def _parse_item_descriptions(container: Any) -> dict[str, str]:
+    """Map ``{name: type}`` for a message block's item descriptions.
+
+    Covers both ``SimpleItemDescription`` (scalar fields, e.g.
+    ``IsMotion: xsd:boolean``) and ``ElementItemDescription`` (complex-typed
+    fields, e.g. ``ProfileToken: tt:ProfileReference``); both carry ``Name``
+    and ``Type`` attributes.
+    """
+    out: dict[str, str] = {}
+    for item in container:
+        if _local_name(getattr(item, "tag", "")) in (
+            "SimpleItemDescription",
+            "ElementItemDescription",
+        ):
+            name = item.get("Name") or ""
+            if name:
+                out[name] = item.get("Type") or ""
+    return out
+
+
+def _parse_message_description(topic_el: Any) -> tuple[bool, dict[str, str], dict[str, str]]:
+    """Extract ``(is_property, source, data)`` from a topic's MessageDescription."""
+    for child in topic_el:
+        if getattr(child, "tag", "") != _MESSAGE_DESCRIPTION:
+            continue
+        source: dict[str, str] = {}
+        data: dict[str, str] = {}
+        for block in child:
+            local = _local_name(getattr(block, "tag", ""))
+            if local == "Source":
+                source = _parse_item_descriptions(block)
+            elif local == "Data":
+                data = _parse_item_descriptions(block)
+        is_property = str(child.get("IsProperty", "")).lower() == "true"
+        return is_property, source, data
+    return False, {}, {}
+
+
+def _collect_topics(elements: Any, path: str, out: List[SupportedEventTopic]) -> None:
+    """Recursively collect described topics from an iterable of elements.
+
+    ``elements`` is any iterable of lxml topic nodes (a list of roots or an
+    lxml Element, whose iteration yields its children). ``MessageDescription``
+    branches and comments/PIs are skipped as topic nodes.
+    """
+    for el in elements:
+        tag = getattr(el, "tag", "")
+        if not isinstance(tag, str) or tag == _MESSAGE_DESCRIPTION:
+            continue
+        local = tag.split("}")[-1]
+        prefix = getattr(el, "prefix", None)
+        name = f"{prefix}:{local}" if prefix else local
+        el_path = f"{path}/{name}" if path else name
+        if str(el.get(_WSTOP_TOPIC_ATTR, "")).lower() == "true":
+            is_property, source, data = _parse_message_description(el)
+            out.append(
+                SupportedEventTopic(
+                    topic=el_path,
+                    is_property=is_property,
+                    source=source,
+                    data=data,
+                )
+            )
+        _collect_topics(el, el_path, out)
+
+
+def _parse_topic_set(topic_set: Any) -> List[SupportedEventTopic]:
+    """Flatten a ``GetEventProperties`` TopicSet into described topics.
+
+    Returns a list of :class:`SupportedEventTopic`, sorted by topic path and
+    de-duplicated, each carrying the topic's ``MessageDescription`` schema
+    (Source/Data item names and types). Handles the zeep ``xsd:any`` container
+    (children in ``_value_1``) as well as a bare lxml Element.
+    """
+    if topic_set is None:
+        return []
+
+    roots: List[Any] = []
+    for attr in ("_value_1", "_value_2"):
+        value = getattr(topic_set, attr, None)
+        if value is None:
+            continue
+        roots.extend(value if isinstance(value, list) else [value])
+    if not roots and _is_lxml_element(topic_set):
+        roots.append(topic_set)
+
+    collected: List[SupportedEventTopic] = []
+    _collect_topics(roots, "", collected)
+
+    by_topic: dict[str, SupportedEventTopic] = {}
+    for topic in collected:
+        by_topic.setdefault(topic.topic, topic)
+    return [by_topic[key] for key in sorted(by_topic)]
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +461,22 @@ class OnvifEventEngine:
     def get_event_properties(self) -> Any:
         """Return the raw ``GetEventProperties`` response (topic set + dialects)."""
         return self._events_service().GetEventProperties()
+
+    def get_supported_event_topics(self) -> List[SupportedEventTopic]:
+        """Return the event types the camera advertises, with their schema.
+
+        Calls ``GetEventProperties`` and flattens the returned ``TopicSet``
+        into a sorted list of :class:`SupportedEventTopic`. Each entry carries
+        the topic path (e.g. ``"tns1:RuleEngine/CellMotionDetector/Motion"``)
+        together with its ``MessageDescription`` — the Source/Data field names
+        and types the notification will contain (e.g.
+        ``data={"IsMotion": "xsd:boolean"}``) and the ``IsProperty`` flag. Any
+        topic may be used as an
+        :class:`~dlstreamer.onvif.event_manager.EventFilter` expression.
+        Returns an empty list when the camera exposes no topics.
+        """
+        props = self._events_service().GetEventProperties()
+        return _parse_topic_set(getattr(props, "TopicSet", None))
 
     # ---- subscription lifecycle ----
 
@@ -571,3 +699,6 @@ class OnvifEventEngine:
 
     async def get_event_properties_async(self) -> Any:
         return await asyncio.to_thread(self.get_event_properties)
+
+    async def get_supported_event_topics_async(self) -> List[SupportedEventTopic]:
+        return await asyncio.to_thread(self.get_supported_event_topics)

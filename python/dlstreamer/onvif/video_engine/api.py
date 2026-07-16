@@ -52,9 +52,11 @@ from ..event_manager import (
     EventCapableCamera,
     EventFilter,
     EventNotification,
+    SupportedEventTopic,
     is_event_capable,
     find_event_capable_cameras,
     find_event_capable_cameras_async,
+    get_supported_event_topics,
     pull_events_once,
     stream_events,
 )
@@ -326,9 +328,11 @@ __all__ = [
     "EventCapableCamera",
     "EventFilter",
     "EventNotification",
+    "SupportedEventTopic",
     "is_event_capable",
     "find_event_capable_cameras",
     "find_event_capable_cameras_async",
+    "get_supported_event_topics",
     "pull_events_once",
     "stream_events",
 ]

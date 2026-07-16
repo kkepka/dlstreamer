@@ -194,6 +194,7 @@ Source README: event_manager/README.md
 | EventNotification | Parsed ONVIF NotificationMessage (topic, utc_time, property_operation, source, data, raw). Supports both zeep objects and raw lxml Element payloads. |
 | EventFilter | Topic-expression filter descriptor used for PullPoint subscription requests. |
 | EventCapableCamera | Camera descriptor confirmed to expose ONVIF Events service. |
+| SupportedEventTopic | One event type advertised by a camera (from GetEventProperties): `topic` path, `is_property` flag, and `source`/`data` maps of `{field_name: type}` describing the notification payload (e.g. `data={"IsMotion": "xsd:boolean"}`). |
 
 ### Public functions
 
@@ -202,6 +203,7 @@ Source README: event_manager/README.md
 | is_event_capable | is_event_capable(hostname: str, port: int, username: str = "", password: str = "", verbose: bool = False) -> bool | hostname, port, username, password, verbose | bool | Quick probe that returns True if camera responds to Events GetServiceCapabilities. |
 | find_event_capable_cameras | find_event_capable_cameras(cameras: Iterable[dict], username: str = "", password: str = "", verbose: bool = False) -> Iterator[EventCapableCamera] | cameras (iterable of descriptors), username, password, verbose | Iterator[EventCapableCamera] | Reads camera descriptors and yields only event-capable cameras (sync). |
 | find_event_capable_cameras_async | find_event_capable_cameras_async(cameras: Iterable[dict] \| AsyncIterable[dict], username: str = "", password: str = "", verbose: bool = False) -> AsyncIterator[EventCapableCamera] | cameras (sync or async source), username, password, verbose | AsyncIterator[EventCapableCamera] | Async variant that accepts both sync and async camera sources. |
+| get_supported_event_topics | get_supported_event_topics(hostname: str, port: int, username: str = "", password: str = "", verbose: bool = False) -> list[SupportedEventTopic] | hostname, port, username, password, verbose | list[SupportedEventTopic] | Reads GetEventProperties and returns the event types a camera advertises, each with its topic path and Source/Data field schema (names + types, e.g. `IsMotion: xsd:boolean`) and the IsProperty flag. No subscription is created. |
 | pull_events_once | pull_events_once(hostname: str, port: int, username: str = "", password: str = "", verbose: bool = False, timeout: str = "PT30S", limit: int = 100, termination_time: str = "PT1H", topic_filter: EventFilter \| None = None) -> list[EventNotification] | hostname, port, credentials, timeout, limit, termination_time, topic_filter | list[EventNotification] | Simplest sync call: subscribe, pull one batch, and close automatically. |
 | stream_events | stream_events(hostname: str, port: int, username: str = "", password: str = "", verbose: bool = False, timeout: str = "PT30S", limit: int = 100, termination_time: str = "PT1H", topic_filter: EventFilter \| None = None, renew_every: float \| None = 300.0) -> AsyncIterator[EventNotification] | hostname, port, credentials, pull settings, optional filter, renew_every | AsyncIterator[EventNotification] | Simplest async stream with automatic subscribe/renew/close lifecycle. |
 
@@ -257,6 +259,7 @@ from dlstreamer.onvif.event_manager.engine import OnvifEventEngine
 | `stream` | `stream(timeout: str = "PT30S", limit: int = 100, renew_every: float \| None = 300.0) -> AsyncIterator[EventNotification]` | Async generator that pulls continuously with auto-renew. |
 | `get_service_capabilities` | `get_service_capabilities() -> dict` | Return EventServiceCapabilities as a flat dict. |
 | `get_event_properties` | `get_event_properties() -> Any` | Return raw GetEventProperties response (topic set + dialects). |
+| `get_supported_event_topics` | `get_supported_event_topics() -> list[SupportedEventTopic]` | Return the event types the camera advertises, each with its topic path and Source/Data field schema, parsed from the GetEventProperties TopicSet + MessageDescription. |
 | `close` | `close() -> None` | Unsubscribe (best-effort) and release zeep clients. |
 | `subscribed` (property) | `bool` | True while a PullPoint subscription is active. |
 | `subscription_reference` (property) | `str` | Subscription reference URL from CreatePullPointSubscription. |
@@ -272,6 +275,7 @@ Async wrappers (offload to thread, identical semantics):
 | `unsubscribe_async` | `unsubscribe_async() -> None` |
 | `get_service_capabilities_async` | `get_service_capabilities_async() -> dict` |
 | `get_event_properties_async` | `get_event_properties_async() -> Any` |
+| `get_supported_event_topics_async` | `get_supported_event_topics_async() -> list[SupportedEventTopic]` |
 
 #### Usage example (manual lifecycle)
 
@@ -387,7 +391,7 @@ For convenience, `dlstreamer.onvif.video_engine` re-exports the full public API 
 
 - from `dlstreamer.onvif.camera_profiles`: `ONVIFProfile`, `CameraProfilesResult`, `read_camera_profiles`, `read_camera_profiles_async`.
 - from `dlstreamer.onvif.ptz`: `PTZVector`, `PTZStatus`, `PTZPreset`, `PTZCapableProfile`, `is_ptz_profile`, `find_ptz_capable_profiles`, `find_ptz_capable_profiles_async`, `PTZController`.
-- from `dlstreamer.onvif.event_manager`: `EventCapableCamera`, `EventFilter`, `EventNotification`, `is_event_capable`, `find_event_capable_cameras`, `find_event_capable_cameras_async`, `pull_events_once`, `stream_events`.
+- from `dlstreamer.onvif.event_manager`: `EventCapableCamera`, `EventFilter`, `EventNotification`, `SupportedEventTopic`, `is_event_capable`, `find_event_capable_cameras`, `find_event_capable_cameras_async`, `get_supported_event_topics`, `pull_events_once`, `stream_events`.
 
 These behave identically to the originals; see the [camera_profiles](#camera_profiles), [ptz](#ptz) and [event_manager](#event_manager) sections above.
 

@@ -75,6 +75,9 @@ engine directly:
 - `stream_events()` — async generator with automatic subscribe / renew / close.
 - `watch_events()` — subscribe and invoke a callback per event (sync or async
   callback); defaults to `print_event_type()`.
+- `get_supported_event_topics()` — list the event types a camera advertises
+  (`GetEventProperties` → parsed topics **with** their Source/Data field schema)
+  without opening a subscription.
 - Re-exports the data model and capability helpers.
 
 ## 3. `model.py` — data model (dataclasses)
@@ -84,6 +87,7 @@ engine directly:
 | `EventFilter` | Topic-expression filter for `CreatePullPointSubscription` (`expression` + `dialect`, default `ConcreteSet`). |
 | `EventNotification` | A parsed `NotificationMessage`: `topic`, `utc_time`, `property_operation` (`Initialized`/`Changed`/`Deleted`), flattened `source`/`data` dicts, plus `raw`. `short()` renders a one-line log form. |
 | `EventCapableCamera` | Camera confirmed to expose an Events service; `camera_id` = `"hostname:port"`, `ok` reflects the probe. |
+| `SupportedEventTopic` | One event type advertised via `GetEventProperties`: `topic` path, `is_property` flag, and `source`/`data` maps of `{field_name: type}` describing the notification payload (e.g. `data={"IsMotion": "xsd:boolean"}`). |
 
 ## 4. `capabilities.py` — event-capable camera discovery
 
@@ -108,7 +112,11 @@ is safe for use from a single asyncio loop (not for parallel multi-thread calls)
   `close`.
 - **Streaming**: `stream()` async generator that keeps pulling and
   auto-renews in the background (`renew_every`); `stream_to_callback()`.
-- **Introspection**: `get_service_capabilities`, `get_event_properties`.
+- **Introspection**: `get_service_capabilities`, `get_event_properties`,
+  `get_supported_event_topics` (parses the `GetEventProperties` `TopicSet` +
+  `MessageDescription` into `SupportedEventTopic` items — topic path plus the
+  Source/Data field names and types, e.g.
+  `tns1:RuleEngine/CellMotionDetector/Motion` with `data={"IsMotion": "xsd:boolean"}`).
 - **Parsing**: `_parse_notification()` handles both the zeep-object path
   (standard cameras) and the lxml-Element path (vendor cameras returning raw
   XML), flattening `Source`/`Data` `SimpleItem` lists into dicts.

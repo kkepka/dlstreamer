@@ -632,6 +632,44 @@ def action_event_properties(state: TestAppState) -> None:
             break
 
 
+def action_supported_events(state: TestAppState) -> None:
+    """List the event types the selected camera advertises (GetEventProperties).
+
+    Shows the full detail for each topic: its Source/Data field names and
+    types (e.g. ``IsMotion:xsd:boolean``) and whether it is a property.
+    """
+    print("\n-- Supported event topics --")
+    if not _ensure_engine(state):
+        return
+    try:
+        topics = state.engine.get_supported_event_topics()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(f"  [ERROR] {type(exc).__name__}: {exc}")
+        return
+    if not topics:
+        print("  (camera advertised no event topics)")
+        return
+    rows = []
+    for i, t in enumerate(topics, 1):
+        source = ",".join(f"{k}:{v}" for k, v in t.source.items()) or "-"
+        data = ",".join(f"{k}:{v}" for k, v in t.data.items()) or "-"
+        # Indent property topics by 4 spaces so they read as a tree hanging
+        # off their parent event topic.
+        indent = "    " if t.is_property else ""
+        rows.append([
+            str(i),
+            f"{indent}{t.topic}"[:64],
+            "property" if t.is_property else "event",
+            source[:40],
+            data[:40],
+        ])
+    _print_table(
+        f"Supported event topics ({len(topics)})",
+        ["#", "topic", "kind", "source (name:type)", "data (name:type)"],
+        rows,
+    )
+
+
 def action_show_state(state: TestAppState) -> None:
     """Dump current in-memory state."""
     print("\n-- Current state --")
@@ -693,6 +731,7 @@ State:       cams={n_cams}  event_capable={n_evc}  selected={sel}  subscribed={s
   Introspection
    10) GetServiceCapabilities
    11) GetEventProperties (topic dialects / TopicSet)
+   16) Supported event topics (parsed list)
 
     Detection helpers
      14) Vehicle/Car detector stream (keyword filter)
@@ -727,6 +766,7 @@ def run() -> None:
         "13": action_clear_notifications,
         "14": action_vehicle_detector,
         "15": action_watch_event_types,
+        "16": action_supported_events,
     }
 
     while True:
